@@ -1,0 +1,9 @@
+#!/bin/sh
+id=$1; shift
+win=$(niri msg -j windows | python3 -c '
+import json, sys
+for w in json.load(sys.stdin):
+    if w.get("app_id") == sys.argv[1]:
+        print(w["id"]); break' "$id")
+if [ -n "$win" ]; then exec niri msg action focus-window --id "$win"; fi
+exec "$@"

@@ -1,0 +1,9 @@
+[package]
+name = "show-desktop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cosmic-protocols = { version = "0.2.0", features = ["client"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }

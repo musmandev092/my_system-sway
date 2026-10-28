@@ -1,0 +1,22 @@
+#!/bin/bash
+set -u
+ini="${XDG_CONFIG_HOME:-$HOME/.config}/gtk-3.0/settings.ini"
+
+apply() {
+    local theme=adw-gtk3 dark=false kv k
+    [ "$1" = "'prefer-dark'" ] && { theme=adw-gtk3-dark; dark=true; }
+    [ "$1" = "'default'" ] && gsettings set org.gnome.desktop.interface color-scheme prefer-light
+    [ "$(gsettings get org.gnome.desktop.interface gtk-theme)" = "'$theme'" ] \
+        || gsettings set org.gnome.desktop.interface gtk-theme "$theme"
+    mkdir -p "${ini%/*}"
+    [ -f "$ini" ] || printf '[Settings]\n' > "$ini"
+    for kv in "gtk-theme-name=$theme" "gtk-application-prefer-dark-theme=$dark"; do
+        k=${kv%%=*}
+        grep -qxF "$kv" "$ini" && continue
+        if grep -q "^$k=" "$ini"; then sed -i "s|^$k=.*|$kv|" "$ini"
+        else sed -i "/^\[Settings\]/a $kv" "$ini"; fi
+    done
+}
+
+apply "$(gsettings get org.gnome.desktop.interface color-scheme)"
+gsettings monitor org.gnome.desktop.interface color-scheme | while read -r _ value; do apply "$value"; done

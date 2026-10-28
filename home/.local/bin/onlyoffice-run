@@ -1,0 +1,6 @@
+#!/bin/sh
+command -v xprop >/dev/null && DISPLAY=${DISPLAY:-:0} xprop -root -f RESOURCE_MANAGER 8s \
+    -set RESOURCE_MANAGER "Xcursor.theme: Adwaita
+Xcursor.size: 24
+" 2>/dev/null
+exec /usr/bin/onlyoffice-desktopeditors "$@"

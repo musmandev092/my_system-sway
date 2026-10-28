@@ -1,0 +1,181 @@
+add_newline = true
+scan_timeout = 30
+command_timeout = 800
+
+format = """
+$username$hostname$directory$git_branch$git_commit$git_state$git_status$package$c$cmake$golang$java$kotlin$lua$nodejs$python$ruby$rust$php$dotnet$docker_context$container$kubernetes$aws$gcloud$azure$terraform$nix_shell$conda$line_break$character"""
+
+right_format = "$status$sudo$jobs$cmd_duration$battery$time"
+
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[❯](bold red)"
+vimcmd_symbol = "[❮](bold blue)"
+
+[directory]
+style = "bold blue"
+truncation_length = 4
+truncate_to_repo = true
+read_only = " read-only"
+read_only_style = "bold red"
+
+[directory.substitutions]
+"~/Projects" = "Projects"
+"~/Downloads" = "Downloads"
+"~/Documents" = "Documents"
+
+[username]
+style_user = "bold yellow"
+style_root = "bold red"
+format = "[$user]($style)@"
+show_always = false
+
+[hostname]
+ssh_only = true
+style = "bold yellow"
+format = "[$hostname]($style) "
+
+[git_branch]
+symbol = "git "
+style = "bold purple"
+format = " on [$symbol$branch(:$remote_branch)]($style)"
+truncation_length = 32
+
+[git_commit]
+commit_hash_length = 7
+only_detached = true
+tag_disabled = false
+tag_symbol = "tag "
+format = " [($hash$tag)]($style)"
+
+[git_state]
+format = " [$state( $progress_current/$progress_total)]($style)"
+
+[git_status]
+style = "bold yellow"
+format = "[ ($all_status$ahead_behind)]($style)"
+conflicted = "conflict:${count} "
+ahead = "ahead:${count} "
+behind = "behind:${count} "
+diverged = "diverged:${ahead_count}/${behind_count} "
+untracked = "new:${count} "
+stashed = "stash:${count} "
+modified = "mod:${count} "
+staged = "stage:${count} "
+renamed = "rename:${count} "
+deleted = "del:${count} "
+
+[status]
+disabled = false
+format = "[exit $status]($style) "
+map_symbol = true
+pipestatus = true
+pipestatus_separator = "|"
+
+[cmd_duration]
+min_time = 1000
+format = "[took $duration](bold yellow) "
+show_milliseconds = true
+
+[jobs]
+symbol = "jobs:"
+format = "[$symbol$number]($style) "
+number_threshold = 1
+
+[sudo]
+disabled = false
+symbol = "sudo"
+format = "[$symbol]($style) "
+
+[battery]
+full_symbol = ""
+charging_symbol = "charging "
+discharging_symbol = "battery "
+unknown_symbol = "battery "
+empty_symbol = "battery "
+format = "[$symbol$percentage]($style) "
+
+[[battery.display]]
+threshold = 20
+style = "bold red"
+
+[[battery.display]]
+threshold = 40
+style = "bold yellow"
+
+[time]
+disabled = false
+time_format = "%H:%M"
+format = "[$time](dimmed white)"
+
+[container]
+symbol = "container "
+format = " in [$symbol$name]($style)"
+
+[docker_context]
+symbol = "docker "
+format = " via [$symbol$context]($style)"
+only_with_files = true
+
+[kubernetes]
+disabled = false
+symbol = "k8s "
+format = " via [$symbol$context( \\($namespace\\))]($style)"
+detect_files = ["k8s", "kubernetes", "Chart.yaml", "helmfile.yaml"]
+
+[package]
+symbol = "pkg "
+format = " via [$symbol$version]($style)"
+
+[python]
+symbol = "py "
+format = " via [$symbol$pyenv_prefix$version( \\($virtualenv\\))]($style)"
+
+[nodejs]
+symbol = "node "
+format = " via [$symbol$version]($style)"
+
+[rust]
+symbol = "rust "
+
+[golang]
+symbol = "go "
+
+[java]
+symbol = "java "
+
+[c]
+symbol = "c "
+
+[cmake]
+symbol = "cmake "
+
+[lua]
+symbol = "lua "
+
+[ruby]
+symbol = "ruby "
+
+[php]
+symbol = "php "
+
+[dotnet]
+symbol = ".net "
+
+[terraform]
+symbol = "tf "
+
+[nix_shell]
+symbol = "nix "
+
+[conda]
+symbol = "conda "
+
+[aws]
+symbol = "aws "
+
+[gcloud]
+symbol = "gcp "
+
+[azure]
+symbol = "azure "

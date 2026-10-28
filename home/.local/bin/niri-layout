@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+import glob, json, os, queue, re, socket, sys, threading, time
+
+PEEK = int(os.environ.get("NIRI_LAYOUT_PEEK", "50"))
+TOL = 1.5
+
+def sock_path():
+    p = os.environ.get("NIRI_SOCKET")
+    if p and os.path.exists(p):
+        return p
+    found = sorted(glob.glob("/run/user/%d/niri.*.sock" % os.getuid()), key=os.path.getmtime)
+    if not found:
+        sys.exit("niri-layout: no niri socket")
+    return found[-1]
+
+def request(*reqs):
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(sock_path())
+    s.sendall(b"".join(json.dumps(r).encode() + b"\n" for r in reqs))
+    f = s.makefile("r")
+    out = [json.loads(f.readline()) for _ in reqs]
+    s.close()
+    return out
+
+def action(name, **args):
+    return {"Action": {name: args}}
+
+def gaps():
+    g = 16
+    d = os.path.expanduser("~/.config/niri")
+    try:
+        text = open(os.path.join(d, "config.kdl")).read()
+        for m in re.finditer(r'^\s*(?:gaps\s+(\d+)|include\s+(?:optional=true\s+)?"([^"]+)")', text, re.M):
+            if m.group(1):
+                g = int(m.group(1))
+            else:
+                try:
+                    for n in re.findall(r"^\s*gaps\s+(\d+)", open(os.path.join(d, m.group(2))).read(), re.M):
+                        g = int(n)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return g
+
+G = gaps()
+
+class State:
+    def __init__(self):
+        wins, wss, outs = request("Windows", "Workspaces", "Outputs")
+        self.windows = wins["Ok"]["Windows"]
+        self.workspaces = {w["id"]: w for w in wss["Ok"]["Workspaces"]}
+        self.outputs = outs["Ok"]["Outputs"]
+        self.focused = next((w for w in self.windows if w["is_focused"]), None)
+        self.focused_ws = next((w["id"] for w in self.workspaces.values() if w["is_focused"]), None)
+
+    def size(self, ws_id):
+        o = self.outputs.get(self.workspaces.get(ws_id, {}).get("output") or "", {}).get("logical")
+        return (o["width"], o["height"]) if o else None
+
+    def columns(self, ws_id):
+        cols = {}
+        for w in self.windows:
+            pos = w["layout"]["pos_in_scrolling_layout"]
+            if w["workspace_id"] == ws_id and not w["is_floating"] and pos:
+                cols.setdefault(pos[0], []).append(w)
+        return [sorted(cols[k], key=lambda w: w["layout"]["pos_in_scrolling_layout"][1]) for k in sorted(cols)]
+
+    def signature(self, ws_id):
+        return (self.workspaces[ws_id].get("output"), tuple(tuple(w["id"] for w in c) for c in self.columns(ws_id)))
+
+def widths(W):
+    return {"half_fit": (W - 3 * G) // 2, "half_ovf": (W - PEEK - 3 * G) // 2,
+            "full": [W - 2 * G - n * PEEK for n in range(3)]}
+
+def classify(win, W, H):
+    tw, th = win["layout"]["tile_size"]
+    if tw >= W - 0.5:
+        return "edges"
+    k = widths(W)
+    if any(abs(tw - x) < TOL for x in (k["half_fit"], k["half_ovf"])):
+        return "half"
+    if any(abs(tw - x) < TOL for x in k["full"]):
+        return "full"
+    return "other"
+
+def relayout(st, ws_id, cls_override=None):
+    """Set the column widths of one workspace. cls_override maps a window id to a class (or to a
+    pixel width for "other"). Returns True when a width was changed."""
+    size = st.size(ws_id)
+    cols = st.columns(ws_id)
+    if not size or not cols:
+        return False
+    W, H = size
+    k = widths(W)
+    over = cls_override or {}
+    plan = []
+    for c in cols:
+        head = c[0]
+        cls = classify(head, W, H)
+        px = head["layout"]["tile_size"][0]
+        for w in c:
+            if w["id"] in over:
+                cls = over[w["id"]]
+                if isinstance(cls, (int, float)):
+                    cls, px = "other", cls
+        plan.append([head, cls, px])
+    nominal = {"half": k["half_fit"], "full": k["full"][0], "edges": k["full"][0]}
+    fits = sum(nominal.get(cls, px) for _, cls, px in plan) + (len(plan) + 1) * G <= W + TOL
+    reqs, want = [], {}
+    for i, (head, cls, px) in enumerate(plan):
+        if cls == "edges":
+            continue
+        if cls == "half":
+            target = k["half_fit"] if fits else k["half_ovf"]
+        elif cls == "full":
+            target = k["full"][(i > 0) + (i < len(plan) - 1)]
+        else:
+            target = px
+        if abs(head["layout"]["tile_size"][0] - target) >= TOL:
+            if target < head["layout"]["tile_size"][0]:
+                LAST_SHRINK[head["id"]] = time.monotonic()
+            reqs.append(action("SetWindowWidth", id=head["id"], change={"SetFixed": int(target)}))
+            want[head["id"]] = int(target)
+    if reqs:
+        request(*reqs)
+        wait_sizes(want)
+    return bool(reqs)
+
+def wait_sizes(want, timeout=0.6):
+    """niri lays the columns out with the sizes the windows actually have, and a window takes a
+    frame or two to answer a resize; the view is only fixed up once they did."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        sizes = {w["id"]: w["layout"]["tile_size"][0] for w in request("Windows")[0]["Ok"]["Windows"]}
+        if all(abs(sizes.get(i, t) - t) < TOL for i, t in want.items()):
+            return
+        time.sleep(0.005)
+
+LAST_SHRINK = {}
+
+def place(ws_id, history=(), settle=False, d=0, removed=False):
+    """Put the view so the focused column shows whole, with a strip of its neighbour on every side
+    that has one, and no empty space on a side without one. niri has no "set view" action: it
+    scrolls only to a column that is not fully visible (flush with the edge it comes in from), or
+    centers one (center-column). niri also draws between the requests of one IPC write, so each
+    focus "hop" through another column can show as a frame of that view. So: as few hops as
+    possible, and only hops that scroll straight to the final view (the column hopped to ends up
+    where it must be, the focused one is then fully visible and does not move again):
+      fits on the screen     after a structure change: first column (it is cut on the left, or
+                             flush left already); on a focus move nothing
+      first or last column   nothing, niri puts it flush with its edge itself; when the last
+                             column was made narrower (niri keeps its left edge, which leaves an
+                             empty strip on the right) or a column was closed (niri keeps the view
+                             where it was) the other end, then back (the one case with a hop
+                             that goes the other way first)
+      full width column      center-column: W-2G-2P wide, both strips show
+      half moving right      right neighbour, then back: [L strip][column][R]
+      half moving left       left neighbour, then back:  [L][column][R strip]
+      otherwise              center-column (the neighbour on that side is not a half)
+    d is the direction of the focus move (-1 left, 1 right, 0 none: a structure change).
+    With a floating window focused, the tiled window focused last is used and focus goes back.
+    settle (columns other than the focused one were removed, so a lone column can sit fully
+    visible away from the left edge, which no scrolling action changes): its window goes to
+    floating and back, and niri puts it at the left edge. (Several narrow columns that fit, fully
+    visible away from the edge, stay where they are: making the first one full width and back
+    moved the view only for a lone column, and showed that width for a few frames.)"""
+    st = State()
+    if st.focused_ws != ws_id:
+        return False
+    f = st.focused
+    cols = st.columns(ws_id)
+    tiled = {w["id"]: w for c in cols for w in c}
+    t = f if f and f["id"] in tiled else next((tiled[i] for i in reversed(history) if i in tiled), None)
+    size = st.size(ws_id)
+    if not t or not size or classify(t, *size) == "edges":
+        return False
+    W, H = size
+    i = t["layout"]["pos_in_scrolling_layout"][0] - 1
+    w = [c[0]["layout"]["tile_size"][0] for c in cols]
+    n = len(cols)
+
+    def pick(c):
+        ids = [x["id"] for x in c]
+        return next((x for x in reversed(history) if x in ids), ids[0])
+
+    two = W - 2 * G - PEEK
+    pair = lambda a, b: 0 <= a and b < n and abs(w[a] + G + w[b] - two) < TOL
+    go = lambda wid: action("FocusWindow", id=wid)
+    hops = []
+    if sum(w) + (n + 1) * G <= W + TOL:
+        if d == 0:
+            first = pick(cols[0])
+            hops = [go(first)]
+            if settle and n > 1 and W / 2 - w[-1] / 2 - (sum(w[:-1]) + (n - 1) * G) < 0:
+                hops = [action("FocusColumnLast"), action("CenterColumn"), go(first)]
+            elif settle and n == 1 and len(cols[0]) == 1:
+                hops += [action("ToggleWindowFloating", id=first), action("ToggleWindowFloating", id=first)]
+    elif i == n - 1 and n > 1 and (removed or time.monotonic() - LAST_SHRINK.get(cols[i][0]["id"], -9) < 2):
+        hops = [action("FocusColumnFirst")]
+    elif i == 0 and n > 1 and removed:
+        hops = [action("FocusColumnLast")]
+    elif i in (0, n - 1):
+        pass
+    elif w[i] >= two - TOL:
+        hops = [action("CenterColumn")]
+    elif d >= 0 and pair(i, i + 1):
+        hops = [go(pick(cols[i + 1]))]
+    elif d <= 0 and pair(i - 1, i):
+        hops = [go(pick(cols[i - 1]))]
+    elif d == 0 and pair(i - 1, i):
+        hops = [go(pick(cols[i - 1]))]
+    else:
+        hops = [action("CenterColumn")]
+    if not hops:
+        return True
+    reqs = [action("FocusTiling")] + hops
+    if hops[0] != action("CenterColumn"):
+        reqs.append(go(t["id"]))
+    if f and f is not t and f["workspace_id"] == ws_id:
+        reqs.append(go(f["id"]))
+    now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
+    if (now and now["id"]) != (f and f["id"]):
+        return False
+    request(*reqs)
+    want = f["id"] if f and f is not t else t["id"]
+    for _ in range(3):
+        time.sleep(0.05)
+        now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
+        if now and now["id"] == want:
+            break
+        request(go(want))
+    return True
+
+KEY_MARK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "niri-layout.key")
+
+def key(which):
+    st = State()
+    f = st.focused
+    fallback = "MaximizeColumn" if which == "full" else "MaximizeWindowToEdges"
+    size = f and st.size(f["workspace_id"])
+    if not f or f["is_floating"] or not f["layout"]["pos_in_scrolling_layout"] or not size:
+        request(action(fallback) if which == "full" else action(fallback, id=None))
+        return
+    W, H = size
+    cls = classify(f, W, H)
+    if cls == "edges" and f["layout"]["tile_size"][1] >= H - 0.5:
+        request(action(fallback) if which == "full" else action(fallback, id=None))
+        return
+    if which == "edges" and cls != "edges":
+        request(action("MaximizeWindowToEdges", id=f["id"]))
+        return
+    new = "half" if (which == "full" and cls == "full") else "full"
+    open(KEY_MARK, "w").close()
+    relayout(st, f["workspace_id"], {f["id"]: new})
+    place(f["workspace_id"])
+
+def own_widths(st, own, skip=()):
+    """Remember the class of every window that has a column to itself (a pixel width for "other",
+    edge to edge keeps what it had before), and return {window id: column window ids}."""
+    col_of = {}
+    for ws in st.workspaces:
+        size = st.size(ws)
+        for c in st.columns(ws):
+            ids = frozenset(w["id"] for w in c)
+            for w in c:
+                col_of[w["id"]] = ids
+            if len(c) == 1 and size and c[0]["id"] not in skip:
+                cls = classify(c[0], *size)
+                if cls != "edges":
+                    own[c[0]["id"]] = c[0]["layout"]["tile_size"][0] if cls == "other" else cls
+    return col_of
+
+def key_recent():
+    try:
+        return time.time() - os.path.getmtime(KEY_MARK) < 1.5
+    except OSError:
+        return False
+
+def daemon():
+    q = queue.Queue()
+
+    def reader():
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(sock_path())
+        s.sendall(b'"EventStream"\n')
+        for line in s.makefile("r"):
+            try:
+                q.put(json.loads(line))
+            except ValueError:
+                pass
+        q.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    st = State()
+    known = {w["id"] for w in st.windows}
+    history = [w["id"] for w in sorted((w for w in st.windows if w.get("focus_timestamp")),
+               key=lambda w: (w["focus_timestamp"]["secs"], w["focus_timestamp"]["nanos"]))]
+    if st.focused:
+        history = [i for i in history if i != st.focused["id"]] + [st.focused["id"]]
+    own = {}
+    col_of = own_widths(st, own)
+    sigs = {}
+    dirty = set()
+    settle = set()
+    removed = set()
+    for ws in st.workspaces:
+        sigs[ws] = st.signature(ws)
+        if relayout(st, ws):
+            dirty.add(ws)
+    if st.focused_ws in dirty and place(st.focused_ws, history):
+        dirty.discard(st.focused_ws)
+    last_focus = st.focused and st.focused["id"]
+
+    def col_widths(st):
+        return tuple(c[0]["layout"]["tile_size"][0] for c in st.columns(st.focused_ws))
+
+    wsw = (st.focused_ws, col_widths(st))
+    replace_at = None
+
+    while True:
+        try:
+            ev = q.get(timeout=None if replace_at is None else max(0, replace_at - time.monotonic()))
+        except queue.Empty:
+            replace_at = None
+            st = State()
+            f = st.focused
+            if f and not f["is_floating"] and f["workspace_id"] == st.focused_ws:
+                place(st.focused_ws, history)
+                st = State()
+            wsw = (st.focused_ws, col_widths(st))
+            continue
+        if ev is None:
+            sys.exit(0)
+        evs = [ev]
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            if any(((e.get("WindowOpenedOrChanged") or {}).get("window") or {}).get("id") not in known | {None}
+                   or "WindowClosed" in e for e in evs):
+                break
+            try:
+                ev = q.get(timeout=0.05)
+            except queue.Empty:
+                break
+            if ev is None:
+                sys.exit(0)
+            evs.append(ev)
+        for e in evs:
+            fid = (e.get("WindowFocusChanged") or {}).get("id")
+            w = (e.get("WindowOpenedOrChanged") or {}).get("window")
+            if w and w.get("is_focused"):
+                fid = w["id"]
+            if fid is not None:
+                if fid in history:
+                    history.remove(fid)
+                history.append(fid)
+
+        st = State()
+        ids = {w["id"] for w in st.windows}
+        byid = {w["id"]: w for w in st.windows}
+        acted = False
+        new = {}
+        for w in st.windows:
+            if w["id"] in known or (not w["is_floating"] and not w["layout"]["pos_in_scrolling_layout"]):
+                continue
+            known.add(w["id"])
+            if w["is_floating"]:
+                continue
+            ws = w["workspace_id"]
+            prev = next((byid[i] for i in reversed(history) if i != w["id"] and i in byid
+                         and byid[i]["workspace_id"] == ws and not byid[i]["is_floating"]
+                         and byid[i]["layout"]["pos_in_scrolling_layout"] and i not in new), None)
+            size = st.size(ws)
+            cls = classify(prev, *size) if prev and size else "half"
+            new[w["id"]] = {"edges": "full", "other": prev and prev["layout"]["tile_size"][0]}.get(cls, cls)
+        history = [i for i in history if i in ids]
+        known &= ids
+        own = {i: c for i, c in own.items() if i in ids}
+        split = {}
+        for ws in st.workspaces:
+            for c in st.columns(ws):
+                i = c[0]["id"]
+                if len(c) == 1 and i not in new and len(col_of.get(i, ())) > 1:
+                    split[i] = own.get(i, "half")
+        new.update(split)
+        col_of = own_widths(st, own, skip=new)
+        for i, cls in new.items():
+            own[i] = cls
+        changed = False
+        for ws in st.workspaces:
+            sig = st.signature(ws)
+            if sig == sigs.get(ws) and not any(byid[i]["workspace_id"] == ws for i in new if i in byid):
+                continue
+            gone = {i for c in sigs.get(ws, (0, ()))[1] for i in c} - {i for c in sig[1] for i in c}
+            if gone and last_focus not in gone:
+                settle.add(ws)
+            if gone:
+                removed.add(ws)
+            sigs[ws] = sig
+            changed |= relayout(st, ws, new)
+            dirty.add(ws)
+        for ws in list(sigs):
+            if ws not in st.workspaces:
+                del sigs[ws]
+                dirty.discard(ws)
+                settle.discard(ws)
+                removed.discard(ws)
+        if st.focused_ws in dirty:
+            dirty.discard(st.focused_ws)
+            acted = place(st.focused_ws, history, settle=st.focused_ws in settle,
+                          removed=st.focused_ws in removed)
+            settle.discard(st.focused_ws)
+            removed.discard(st.focused_ws)
+        fid = st.focused and st.focused["id"]
+        f = st.focused
+        if (not acted and fid != last_focus and f and not f["is_floating"]
+                and f["workspace_id"] == st.focused_ws):
+            p = byid.get(last_focus)
+            d = 0
+            if p and p["workspace_id"] == f["workspace_id"] and p["layout"]["pos_in_scrolling_layout"]:
+                d = (f["layout"]["pos_in_scrolling_layout"][0] > p["layout"]["pos_in_scrolling_layout"][0]) - \
+                    (f["layout"]["pos_in_scrolling_layout"][0] < p["layout"]["pos_in_scrolling_layout"][0])
+            acted = place(st.focused_ws, history, d=d)
+        last_focus = fid
+        if acted or changed:
+            st = State()
+        elif (wsw[0] == st.focused_ws and wsw[1] != col_widths(st) and f and not f["is_floating"]
+                and f["workspace_id"] == st.focused_ws and not key_recent()):
+            replace_at = time.monotonic() + 0.4
+        wsw = (st.focused_ws, col_widths(st))
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "daemon":
+        daemon()
+    elif cmd in ("full", "edges"):
+        key(cmd)
+    else:
+        sys.exit("usage: niri-layout daemon|full|edges")

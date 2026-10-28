@@ -1,0 +1,8 @@
+if [ -f "$HOME/.config/chromium-flags.conf" ]; then
+    CHROMIUM_FLAGS+=" $(grep -vE '^[[:space:]]*(#|$)' "$HOME/.config/chromium-flags.conf" | tr '\n' ' ')"
+    _id=$(sed -n 's/^--oauth2-client-id=//p' "$HOME/.config/chromium-flags.conf" | tail -n1)
+    _secret=$(sed -n 's/^--oauth2-client-secret=//p' "$HOME/.config/chromium-flags.conf" | tail -n1)
+    [ -n "$_id" ] && export GOOGLE_DEFAULT_CLIENT_ID="$_id"
+    [ -n "$_secret" ] && export GOOGLE_DEFAULT_CLIENT_SECRET="$_secret"
+    unset _id _secret
+fi

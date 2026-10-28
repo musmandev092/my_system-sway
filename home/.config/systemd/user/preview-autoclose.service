@@ -1,0 +1,12 @@
+[Unit]
+Description=Close the Nautilus preview when it loses focus
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/preview-autoclose
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

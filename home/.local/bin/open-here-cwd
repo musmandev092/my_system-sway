@@ -1,0 +1,127 @@
+#!/bin/bash
+fallback() { printf '%s\n' "$HOME"; exit 0; }
+
+info=$(timeout 3 python3 -I -c '
+import json, subprocess
+def niri(*a):
+    try: return json.loads(subprocess.run(["niri", "msg", "-j", *a], capture_output=True, text=True).stdout)
+    except Exception: return None
+w = niri("focused-window")
+if not w:
+    act = [s.get("active_window_id") for s in niri("workspaces") or [] if s.get("is_focused")]
+    w = next((x for x in niri("windows") or [] if act and x.get("id") == act[0]), None) or {}
+print(w.get("app_id") or ""); print(w.get("pid") or ""); print(w.get("id") or ""); print((w.get("title") or "").replace("\n", " "))
+' 2>/dev/null) || fallback
+{ read -r app; read -r wpid; read -r wid; read -r title; } <<<"$info"
+
+case "$app" in
+    cursor|Cursor|org.gnome.Nautilus|com.anthropic.Claude)
+        py=$(cat <<'PYEOF'
+import glob, json, os, re, subprocess, sys
+from urllib.parse import unquote, urlparse
+app, pid, wid, title = sys.argv[1:]
+home = os.path.expanduser("~")
+
+def path(uri):
+    u = urlparse(uri or "")
+    p = unquote(u.path) if u.scheme == "file" and u.netloc in ("", "localhost") else None
+    return p if p and os.path.isdir(p) else None
+
+def name(p):
+    return "Home" if p == home else (os.path.basename(p.rstrip("/")) or "/")
+
+def unique(paths):
+    paths = set(p for p in paths if p)
+    return paths.pop() if len(paths) == 1 else None
+
+if app.lower() == "cursor":
+    st = json.load(open(os.path.join(home, ".config/Cursor/User/globalStorage/storage.json")))
+    ws = st.get("windowsState") or {}
+    last = path((ws.get("lastActiveWindow") or {}).get("folder"))
+    cands = [last] + [path(w.get("folder")) for w in ws.get("openedWindows") or []] \
+        + [path(f.get("folderUri")) for f in (st.get("backupWorkspaces") or {}).get("folders") or []]
+    rest = re.sub(r"\s+[-—]\s+Cursor\s*$", "", title.strip())
+    hit = unique(p for p in cands if p and re.search(r"(^|\s[-—]\s)" + re.escape(name(p)) + r"$", rest))
+    if not hit and sum(1 for w in json.loads(subprocess.run(["niri", "msg", "-j", "windows"],
+            capture_output=True, text=True).stdout) if w.get("app_id") == app) == 1:
+        hit = last
+    print(hit or "")
+elif app == "com.anthropic.Claude":
+    if sum(1 for w in json.loads(subprocess.run(["niri", "msg", "-j", "windows"],
+            capture_output=True, text=True).stdout) if w.get("app_id") == app) != 1:
+        sys.exit(0)
+    base = os.path.join(home, ".config/Claude")
+    with open(os.path.join(base, "logs/main.log"), "rb") as f:
+        f.seek(max(0, os.fstat(f.fileno()).st_size - 4 * 1024 * 1024))
+        found = re.findall(rb"LocalSessions\.setFocusedSession: sessionId=(\S*)", f.read())
+    sid = found[-1].decode() if found else ""
+    if not re.fullmatch(r"local_[0-9a-f-]+", sid):
+        sys.exit(0)
+    cwds = []
+    for sf in glob.glob(os.path.join(glob.escape(base), "claude-code-sessions", "*", "*", sid + ".json")):
+        s = json.load(open(sf))
+        if s.get("sessionId") == sid and isinstance(s.get("cwd"), str) and os.path.isdir(s["cwd"]):
+            cwds.append(s["cwd"])
+    print(unique(cwds) or "")
+else:
+    def bus(*a):
+        return json.loads(subprocess.run(["busctl", "--user", "--json=short", *a], capture_output=True, text=True, timeout=3).stdout)["data"]
+    owner = bus("call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                "GetConnectionUnixProcessID", "s", "org.freedesktop.FileManager1")[0]
+    if str(owner) != pid:
+        sys.exit(0)
+    wins = bus("get-property", "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+               "org.freedesktop.FileManager1", "OpenWindowsWithLocations")
+    hit = unique(path(u) for locs in wins.values() for u in locs if path(u) and name(path(u)) == title)
+    if not hit:
+        nw = sorted(w["id"] for w in json.loads(subprocess.run(["niri", "msg", "-j", "windows"],
+                    capture_output=True, text=True).stdout) if str(w.get("pid")) == pid)
+        dw = sorted(wins, key=lambda k: int(k.rsplit("/", 1)[-1]))
+        if len(nw) == len(dw) and int(wid) in nw:
+            locs = wins[dw[nw.index(int(wid))]]
+            hit = unique(path(u) for u in locs if path(u) and name(path(u)) == title)
+    print(hit or "")
+PYEOF
+)
+        dir=$(timeout 4 python3 -I -c "$py" "$app" "$wpid" "$wid" "$title" 2>/dev/null)
+        [ -n "$dir" ] && [ -d "$dir" ] && { printf '%s\n' "$dir"; exit 0; }
+        fallback ;;
+esac
+
+case "$app" in
+    org.gnome.Ptyxis|org.gnome.Console|kgx|foot|footclient|kitty|Alacritty|com.mitchellh.ghostty|org.wezfurlong.wezterm|xterm) ;;
+    *) fallback ;;
+esac
+[ -n "$wpid" ] && [ -d "/proc/$wpid" ] || fallback
+
+declare -A parent depth best bestd
+while read -r pid ppid tty comm; do parent[$pid]=$ppid; done < <(ps -eo pid=,ppid=,tty=,comm=)
+while read -r pid ppid tty comm; do
+    case "$comm" in bash|zsh|fish|sh|dash|ksh|nu|tcsh) ;; *) continue ;; esac
+    [ "$tty" = "?" ] && continue
+    p=$pid d=0
+    while [ -n "${parent[$p]}" ] && [ "$p" != "$wpid" ] && [ "$p" != 1 ]; do p=${parent[$p]}; d=$((d+1)); done
+    [ "$p" = "$wpid" ] || continue
+    if [ -z "${best[$tty]}" ] || [ "$d" -gt "${bestd[$tty]}" ]; then best[$tty]=$pid; bestd[$tty]=$d; fi
+done < <(ps -eo pid=,ppid=,tty=,comm=)
+
+dirs=() ttys=()
+for tty in "${!best[@]}"; do
+    dir=$(readlink "/proc/${best[$tty]}/cwd" 2>/dev/null) && [ -d "$dir" ] || continue
+    dirs+=("$dir"); ttys+=("$tty")
+done
+[ "${#dirs[@]}" -gt 0 ] || fallback
+[ "${#dirs[@]}" -eq 1 ] && { printf '%s\n' "${dirs[0]}"; exit 0; }
+
+rest=$(printf '%s' "$title" | sed -n 's/^[^ :]*@[^ :]*:\([~/].*\)$/\1/p')
+for hint in "${rest% — *}" "$rest"; do
+    case "$hint" in "~") hint=$HOME ;; "~/"*) hint=$HOME/${hint#"~/"} ;; esac
+    [ -n "$hint" ] || continue
+    for dir in "${dirs[@]}"; do [ "$dir" = "$hint" ] && { printf '%s\n' "$dir"; exit 0; }; done
+done
+newest=0 pick=${dirs[0]}
+for i in "${!ttys[@]}"; do
+    t=$(stat -c %Y "/dev/${ttys[$i]}" 2>/dev/null || echo 0)
+    [ "$t" -gt "$newest" ] && { newest=$t; pick=${dirs[$i]}; }
+done
+printf '%s\n' "$pick"

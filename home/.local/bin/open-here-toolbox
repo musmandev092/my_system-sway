@@ -1,0 +1,15 @@
+#!/bin/sh
+c=$1; shift
+exec toolbox run -c "$c" sh -c '
+host=$1; shift
+me=$$
+start() { sed "s/.*) //" "/proc/$1/stat" 2>/dev/null | cut -d" " -f20; }
+(
+    t=$(start "$me")
+    while [ -e "/proc/$host" ] && [ "$(start "$me")" = "$t" ]; do sleep 0.5; done
+    [ "$(start "$me")" = "$t" ] || exit 0
+    kill -HUP "$me" 2>/dev/null
+    sleep 3
+    [ "$(start "$me")" = "$t" ] && kill -KILL "$me" 2>/dev/null
+) </dev/null >/dev/null 2>&1 &
+exec "$@"' sh "$$" "$@"

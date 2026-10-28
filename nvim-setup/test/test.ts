@@ -1,0 +1,5 @@
+const x = { a: 1, b: 2 };
+function greet(name: string) {
+  return "hi " + name;
+}
+console.log(greet("x"), x);

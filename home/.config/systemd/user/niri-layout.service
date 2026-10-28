@@ -1,0 +1,12 @@
+[Unit]
+Description=niri column widths: halves fill the screen, neighbours peek in when the strip overflows
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/niri-layout daemon
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

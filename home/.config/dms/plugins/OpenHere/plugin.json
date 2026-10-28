@@ -1,0 +1,12 @@
+{
+    "id": "openHere",
+    "name": "Open Here",
+    "description": "Menu (Mod+Z) to open Claude Code, Antigravity, Cursor, Files, a terminal, Neovim or Lazygit in the focused terminal's folder. dms ipc call openHere toggle",
+    "version": "1.0.0",
+    "author": "Muhammad Usman",
+    "type": "daemon",
+    "capabilities": ["daemon", "ipc"],
+    "component": "./OpenHereDaemon.qml",
+    "icon": "folder_open",
+    "requires": ["ptyxis", "niri", "wl-copy"]
+}

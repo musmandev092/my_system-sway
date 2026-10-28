@@ -1,0 +1,10 @@
+[Unit]
+Description=my_system: finish the personal setup on the first login
+ConditionPathExists=!%h/.local/state/my_system/firstrun.done
+
+[Service]
+Type=simple
+ExecStart=%h/Projects/my_system/install/firstrun.sh
+
+[Install]
+WantedBy=default.target

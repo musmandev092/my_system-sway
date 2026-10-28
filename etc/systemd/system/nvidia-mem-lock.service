@@ -1,0 +1,11 @@
+[Unit]
+Description=Lock NVIDIA GPU memory clock to 8001 MHz
+After=nvidia-persistenced.service nvidia-resume.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nvidia-smi --lock-memory-clocks=8001,8001
+
+[Install]
+WantedBy=multi-user.target nvidia-resume.service

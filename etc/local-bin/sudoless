@@ -1,0 +1,93 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly SELF=/usr/local/bin/sudoless
+readonly TIMED=/etc/sudoers.d/99-sudoless
+readonly PERM=/etc/sudoers.d/99-sudoless-permanent
+readonly BOOT_CLEAN=/etc/tmpfiles.d/sudoless.conf
+readonly LOCK=/run/lock/sudoless.lock
+readonly DEFAULT=120 MAX=1440
+
+die() { echo "sudoless: $*" >&2; exit 1; }
+usage() { echo "Usage: sudoless [on [1-$MAX|permanent] | off | status]" >&2; exit 2; }
+
+if [[ $EUID -ne 0 ]]; then
+    [[ $(readlink -f "$0") == "$SELF" ]] || die "run the installed copy: $SELF"
+    exec sudo -- "$SELF" "$@"
+fi
+
+user=${SUDO_USER:-}
+deadline_of() { sed -n 's/.* NOTAFTER=\([0-9]\{14\}Z\) .*/\1/p' "$1" 2>/dev/null; }
+now_utc() { date -u +%Y%m%d%H%M%SZ; }
+stop_timers() { systemctl stop 'sudoless-expire*.timer' 'sudoless-expire*.service' >/dev/null 2>&1 || true; }
+
+status() {
+    local d left
+    if [[ -f $PERM ]]; then echo "sudoless: ON permanently (sudoless off to stop)"
+    elif [[ -f $TIMED ]]; then
+        d=$(deadline_of "$TIMED")
+        if [[ -z $d ]]; then echo "sudoless: ON with no deadline (old rule; run sudoless on/off to replace it)"
+        elif [[ $(now_utc) < $d ]]; then
+            left=$(( ($(date -u -d "${d:0:8} ${d:8:2}:${d:10:2}:${d:12:2}" +%s) - $(date +%s) + 59) / 60 ))
+            echo "sudoless: ON for $left more minute(s), until $(date -d "${d:0:8} ${d:8:2}:${d:10:2}:${d:12:2} UTC" '+%H:%M')"
+        else rm -f -- "$TIMED"; echo "sudoless: OFF (rule had expired; removed)"; fi
+    else echo "sudoless: OFF"; fi
+}
+
+publish() {
+    local tmp
+    tmp=$(mktemp /etc/sudoers.d/.sudoless.XXXXXX)
+    printf '%s\n' "$1" > "$tmp"
+    chmod 0440 "$tmp"
+    if ! visudo -cqf "$tmp"; then rm -f -- "$tmp"; die "generated rule failed visudo; nothing changed"; fi
+    mv -fT -- "$tmp" "$2"
+}
+
+enable() {
+    local minutes=$1 expires deadline
+    [[ $user =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "run it as your user (through sudo), not as root"
+    if [[ -t 0 ]]; then
+        echo "WARNING: any program running as $user can run ANY command as root without a password"
+        [[ $minutes == permanent ]] && echo "until you run 'sudoless off'." || echo "for the next $minutes minutes."
+        read -r -p "Type yes to enable: " ans
+        [[ $ans == yes ]] || { echo "Aborted; nothing changed."; exit 1; }
+    fi
+    if [[ $minutes == permanent ]]; then
+        publish "$user ALL=(ALL) NOPASSWD: ALL" "$PERM"
+        rm -f -- "$TIMED"; stop_timers
+        echo "sudoless: ON permanently. Run 'sudoless off' to stop."
+        return
+    fi
+    expires=$(( $(date +%s) + minutes * 60 ))
+    deadline=$(date -u -d "@$expires" +%Y%m%d%H%M%SZ)
+    printf '# sudoless: timed passwordless-sudo rules never survive a reboot\nr! %s\n' "$TIMED" > "$BOOT_CLEAN"
+    stop_timers
+    systemd-run --quiet --collect --unit="sudoless-expire-$expires" --on-calendar="@$expires" \
+        --timer-property=AccuracySec=1s -- "$SELF" __expire >/dev/null
+    publish "$user ALL=(ALL) NOTAFTER=$deadline NOPASSWD: ALL" "$TIMED"
+    rm -f -- "$PERM"
+    echo "sudoless: ON for $minutes minute(s), until $(date -d "@$expires" '+%H:%M'). Run 'sudoless off' to stop early."
+}
+
+exec {lock}>"$LOCK"; flock -w 30 "$lock" || die "another sudoless is running"
+
+case "${1:-status}" in
+    status) [[ $# -le 1 ]] || usage; status ;;
+    on)
+        [[ $# -le 2 ]] || usage
+        m=${2:-$DEFAULT}
+        if [[ $m != permanent ]]; then
+            [[ $m =~ ^[0-9]{1,4}$ ]] && (( 10#$m >= 1 && 10#$m <= MAX )) || usage
+            m=$((10#$m))
+        fi
+        enable "$m" ;;
+    off)
+        [[ $# -le 1 ]] || usage
+        rm -f -- "$TIMED" "$PERM"; stop_timers
+        echo "sudoless: OFF. sudo asks for your password again." ;;
+    __expire)
+        d=$(deadline_of "$TIMED")
+        [[ -n $d && ! $(now_utc) < $d ]] && rm -f -- "$TIMED"
+        exit 0 ;;
+    *) usage ;;
+esac

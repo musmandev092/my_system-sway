@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LocalSend
+GenericName=File Transfer
+Comment=Share files with nearby devices
+Exec=/opt/localsend/localsend_app
+Icon=localsend
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=share;send;transfer;phone;airdrop;
+StartupWMClass=org.localsend.localsend_app
