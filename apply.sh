@@ -357,6 +357,11 @@ EOF
         sed -i -E 's/^    Mod\+Shift\+F \{ (fullscreen-window|maximize-column|maximize-window-to-edges); \}$/    Mod+Shift+F { spawn "niri-layout" "edges"; }/' "$nb"
         changed=1
     fi
+    if [ -f "$nb" ] && grep -q 'spawn "dms" "screenshot"' "$nb"; then
+        sed -i -e 's/spawn "dms" "screenshot"; }/spawn "screenshot-notify"; }/' \
+               -e 's/spawn "dms" "screenshot" "\(full\|window\)"; }/spawn "screenshot-notify" "\1"; }/' "$nb"
+        changed=1
+    fi
     if [ "$changed" = 1 ]; then
         niri msg action load-config-file >/dev/null 2>&1 || true
         done_ "keys Mod+D launcher, Mod+B browser, Mod+F maximize (updated)"
@@ -411,6 +416,7 @@ PYEOF
         || note "dconf is not installed: light/dark settings are lost (add it to the system packages)"
     link home/.local/bin/gtk-theme-follow .local/bin/gtk-theme-follow
     link home/.local/bin/focus-or-run .local/bin/focus-or-run
+    link home/.local/bin/screenshot-notify .local/bin/screenshot-notify
     link home/.local/share/applications/btop.desktop .local/share/applications/btop.desktop
     link home/.config/systemd/user/gtk-theme-follow.service .config/systemd/user/gtk-theme-follow.service
     link home/.local/bin/preview-autoclose .local/bin/preview-autoclose

@@ -1,0 +1,11 @@
+#!/bin/sh
+mode=${1:-region}
+json=$(dms screenshot "$mode" --no-notify --json) || exit 0
+file=$(printf '%s' "$json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("path",""))' 2>/dev/null)
+[ -n "$file" ] && [ -f "$file" ] || exit 0
+action=$(timeout 60 notify-send -a Screenshot -i "$file" -A edit=Edit -A open=Open "Screenshot captured" "$(basename "$file")
+Copied to clipboard")
+case "$action" in
+    edit) exec swappy -f "$file" -o "$file" ;;
+    open) exec xdg-open "$file" ;;
+esac
