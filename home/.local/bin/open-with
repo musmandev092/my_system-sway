@@ -9,9 +9,15 @@ def activate(app):
     win = Gtk.ApplicationWindow(application=app)
     dialog = Gtk.AppChooserDialog.new(win, 0, f)
     dialog.set_heading("Open With")
+    widget = dialog.get_widget()
+    widget.set_show_recommended(False)
+    widget.set_show_default(False)
+    widget.set_show_all(True)
     def done(d, response):
         if response == Gtk.ResponseType.OK:
-            d.get_app_info().launch([f], None)
+            info = d.get_app_info()
+            if info.get_id() != "open-with.desktop":
+                info.launch([f], None)
         d.destroy()
         app.quit()
     dialog.connect("response", done)
