@@ -293,15 +293,16 @@ import re, sys
 p = sys.argv[1]; s = old = open(p).read()
 s = re.sub(r"    // minimal: every niri animation runs at double speed\n    slowdown 0\.5\n", "", s)
 s = s.replace("    // minimal, close to sway: windows open/close instantly, the rest ~3x faster\n", "")
-note = ("    // minimal, close to sway: windows open, close, resize and move instantly and the view jumps\n"
-        "    // (niri-layout places it; an animated view shows its steps); workspaces and the overview\n"
-        "    // slide fast, without overshoot\n")
+note = ("    // minimal: short ease-out open, close, scroll and move (slowdown 0.35 makes them 90, 70, 100, 100 ms),\n"
+        "    // resize instant (niri-layout sets widths); workspaces and the overview slide fast, no overshoot\n")
 if note not in s:
     s = s.replace("animations {\n", "animations {\n" + note, 1)
 if "\n    slowdown 0.35\n" not in s:
     s = s.replace(note, note + "    slowdown 0.35\n", 1)
-for name in ("window-open", "window-close", "window-resize", "window-movement", "horizontal-view-movement"):
-    s = re.sub(r"    %s \{\n(?:        [^\n]*\n)*?    \}\n" % name, "    %s { off; }\n" % name, s, count=1)
+block = r"    %s \{(?:\n(?:        [^\n]*\n)*?    \}|[^\n]*\})\n"
+for name, ms in (("window-open", 257), ("window-close", 200), ("horizontal-view-movement", 286), ("window-movement", 286)):
+    s = re.sub(block % name, '    %s {\n        duration-ms %d\n        curve "ease-out-quad"\n    }\n' % (name, ms), s, count=1)
+s = re.sub(block % "window-resize", "    window-resize { off; }\n", s, count=1)
 for name, stiff in (("workspace-switch", 1000), ("overview-open-close", 800)):
     s = re.sub(r"(    %s \{\n        spring )damping-ratio=[0-9.]+ stiffness=\d+" % name,
                r"\g<1>damping-ratio=1.0 stiffness=%d" % stiff, s, count=1)
@@ -360,6 +361,23 @@ EOF
     if [ -f "$nb" ] && grep -q 'spawn "dms" "screenshot"' "$nb"; then
         sed -i -e 's/spawn "dms" "screenshot"; }/spawn "screenshot-notify"; }/' \
                -e 's/spawn "dms" "screenshot" "\(full\|window\)"; }/spawn "screenshot-notify" "\1"; }/' "$nb"
+        changed=1
+    fi
+    if [ -f "$nb" ] && ! grep -q '^    Mod+Alt+A ' "$nb"; then
+        while IFS='|' read -r key title act; do
+            sed -i "/^binds {/a\\    $key hotkey-overlay-title=\"$title\" { $act; }" "$nb"
+        done <<'WASD'
+Mod+Alt+A|WASD: Focus Left|focus-column-left
+Mod+Alt+D|WASD: Focus Right|focus-column-right
+Mod+Alt+W|WASD: Workspace Up|focus-workspace-up
+Mod+Alt+S|WASD: Workspace Down|focus-workspace-down
+Mod+Alt+Shift+A|WASD: Move Column Left|move-column-left
+Mod+Alt+Shift+D|WASD: Move Column Right|move-column-right
+Mod+Alt+Shift+W|WASD: Column To Workspace Up|move-column-to-workspace-up
+Mod+Alt+Shift+S|WASD: Column To Workspace Down|move-column-to-workspace-down
+Mod+Alt+Q|WASD: Window Up In Column|focus-window-up
+Mod+Alt+E|WASD: Window Down In Column|focus-window-down
+WASD
         changed=1
     fi
     if [ "$changed" = 1 ]; then
