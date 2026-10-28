@@ -84,13 +84,14 @@ def classify(win, W, H):
         return "full"
     return "other"
 
-def relayout(st, ws_id, cls_override=None):
-    """Set the column widths of one workspace. cls_override maps a window id to a class (or to a
-    pixel width for "other"). Returns True when a width was changed."""
+def plan_widths(st, ws_id, cls_override=None):
+    """Target width of every column of one workspace: [(head window, current width, target)],
+    target None for a column left alone (edge to edge). cls_override maps a window id to a class
+    (or to a pixel width for "other"). Also returns whether the strip fits on the screen."""
     size = st.size(ws_id)
     cols = st.columns(ws_id)
     if not size or not cols:
-        return False
+        return [], True
     W, H = size
     k = widths(W)
     over = cls_override or {}
@@ -107,27 +108,41 @@ def relayout(st, ws_id, cls_override=None):
         plan.append([head, cls, px])
     nominal = {"half": k["half_fit"], "full": k["full"][0], "edges": k["full"][0]}
     fits = sum(nominal.get(cls, px) for _, cls, px in plan) + (len(plan) + 1) * G <= W + TOL
-    reqs, want = [], {}
+    out = []
     for i, (head, cls, px) in enumerate(plan):
         if cls == "edges":
-            continue
-        if cls == "half":
+            target = None
+        elif cls == "half":
             target = k["half_fit"] if fits else k["half_ovf"]
         elif cls == "full":
             target = k["full"][(i > 0) + (i < len(plan) - 1)]
         else:
             target = px
-        if abs(head["layout"]["tile_size"][0] - target) >= TOL:
-            if target < head["layout"]["tile_size"][0]:
-                LAST_SHRINK[head["id"]] = time.monotonic()
-            reqs.append(action("SetWindowWidth", id=head["id"], change={"SetFixed": int(target)}))
-            want[head["id"]] = int(target)
-    if reqs:
-        request(*reqs)
-        wait_sizes(want)
-    return bool(reqs)
+        out.append((head, head["layout"]["tile_size"][0], target if target is None else int(target)))
+    return out, fits
 
-def wait_sizes(want, timeout=0.6):
+
+def set_widths(targets):
+    """targets {window id: width}: send them, wait until the windows have them."""
+    if targets:
+        request(*[action("SetWindowWidth", id=i, change={"SetFixed": t}) for i, t in targets.items()])
+        wait_sizes(targets)
+
+
+def relayout(st, ws_id, cls_override=None):
+    """Set the column widths of one workspace (see plan_widths). Returns True when a width was
+    changed."""
+    plan, _ = plan_widths(st, ws_id, cls_override)
+    want = {}
+    for head, cur, target in plan:
+        if target is not None and abs(cur - target) >= TOL:
+            if target < cur and cur < st.size(ws_id)[0] - 0.5:     # not leaving edge to edge
+                LAST_SHRINK[head["id"]] = time.monotonic()
+            want[head["id"]] = target
+    set_widths(want)
+    return bool(want)
+
+def wait_sizes(want, timeout=1.0):
     """niri lays the columns out with the sizes the windows actually have, and a window takes a
     frame or two to answer a resize; the view is only fixed up once they did."""
     end = time.monotonic() + timeout
@@ -139,33 +154,225 @@ def wait_sizes(want, timeout=0.6):
 
 LAST_SHRINK = {}
 
+# The view. niri does not report where it has scrolled to and has no "scroll to" action: it
+# scrolls only to a focused column that is not fully visible (flush with the screen edge it comes
+# in from, a gap away), centers one on request (center-column), and when a width changes keeps the
+# focused column where it is on screen. Those rules are few, so the daemon follows the view itself:
+# VIEW[ws] = {"ids": columns, "w": widths, "a": focused column, "V": where the screen starts, in
+# strip coordinates (columns side by side from 0, a gap between)}. Not there when unknown (at the
+# start, after a change not followed, like a column moved); then place_blind's hops are used.
+VIEW = {}
+
+
+def colx(w):
+    xs, x = [], 0.0
+    for v in w:
+        xs.append(x)
+        x += v + G
+    return xs
+
+
+def sim(ops, w, V, a, W):
+    """niri's rules over ops: ("f", k) focus column k, ("w", k, px) width of column k, ("c",)
+    center the focused column. Returns (V, focused column, widths, V after every op)."""
+    w = list(w)
+    path = []
+
+    def ensure(V, k):
+        x = colx(w)[k] - V
+        if x < -TOL:
+            return colx(w)[k] - G
+        if x + w[k] > W + TOL:
+            return colx(w)[k] + w[k] + G - W
+        return V
+
+    for op in ops:
+        if op[0] == "f":
+            a = op[1]
+            V2 = ensure(V, a)
+        elif op[0] == "w":
+            before = colx(w)[a]
+            w[op[1]] = op[2]
+            V = V + colx(w)[a] - before     # strip coordinates moved, nothing on screen
+            V2 = ensure(V, a)
+        elif op[0] == "c":
+            V2 = colx(w)[a] + w[a] / 2 - W / 2
+        else:
+            continue
+        path.append(V2 - V if op[0] != "w" else (V2 - V) * JUMP)   # how far the view scrolls
+        V = V2
+    return V, a, w, path
+
+
+JUMP = 1.0000001    # marks a scroll that comes with a width change: niri does not animate it
+
+
+def reversals(ops, w, V, a, W):
+    """How often an edge of a window on screen moves one way and later the other way."""
+    w = list(w)
+    clip = lambda v: min(max(v, 0), W)
+    def edges(w, V):
+        xs = colx(w)
+        return [(clip(xs[k] - V), clip(xs[k] + w[k] - V)) for k in range(len(w))]
+    seq = [edges(w, V)]
+    for op in ops:
+        V, a, w, _ = sim([op], w, V, a, W)
+        seq.append(edges(w, V))
+    n = 0
+    for k in range(len(w)):
+        for e in (0, 1):
+            d = [seq[i + 1][k][e] - seq[i][k][e] for i in range(len(seq) - 1)]
+            d = [v for v in d if abs(v) > 3]
+            n += sum(1 for p, q in zip(d, d[1:]) if p * q < 0)
+    return n
+
+
+def jumps(path):
+    return sum(1 for d in path if abs(d) > TOL and abs(abs(d) / JUMP - abs(d)) > 1e-9 * abs(d))
+
+
+def monotonic(V0, path):
+    steps = [d for d in path if abs(d) > TOL]
+    return all(s > 0 for s in steps) or all(s < 0 for s in steps)
+
+
+def target_x(w, t, W, d=0, cur=None):
+    """Where column t has to start on screen: whole, a strip of the neighbour on every side that
+    has one, nothing empty on a side without one."""
+    n = len(w)
+    two = W - 2 * G - PEEK
+    if sum(w) + (n + 1) * G <= W + TOL:
+        return G + colx(w)[t]
+    if t == 0:
+        return G
+    if t == n - 1:
+        return W - G - w[t]
+    if w[t] >= W - 2 * G - 2 * PEEK - TOL:
+        return (W - w[t]) / 2                           # full width: both strips
+    pair = lambda a, b: 0 <= a and b < n and abs(w[a] + G + w[b] - two) < TOL
+    right, left = pair(t, t + 1), pair(t - 1, t)
+    xr, xl = G + PEEK, G + w[t - 1] + G
+    if right and left:
+        # a side is "clean" when the half shown whole there is the end of the strip, so the other
+        # screen edge shows the strip of the window beyond: Claude | WhatsApp | Files | btop
+        # with Files focused is [WhatsApp strip][Files][btop], not WhatsApp flush left and no
+        # sign of Claude
+        cr, cl = t + 1 == n - 1, t - 1 == 0
+        if cr != cl:
+            return xr if cr else xl
+        if cur is not None and min(abs(cur - xr), abs(cur - xl)) < TOL:
+            return cur                                  # already one of the two: no movement
+        return xl if d < 0 and not cr else xr
+    if right:
+        return xr
+    if left:
+        return xl
+    return (W - w[t]) / 2
+
+
+def candidates(w, t):
+    """Op sequences that end with column t focused, simplest first."""
+    n = len(w)
+    out = [[]]
+    out += [[("f", k), ("f", t)] for k in sorted((k for k in range(n) if k != t), key=lambda k: abs(k - t))]
+    out.append([("c",)])
+    for k in (t + 1, t - 1):
+        if 0 <= k < n:
+            # flush with the screen edge plus PEEK, which niri cannot do by itself: t made PEEK
+            # wider on the side away from k (k focused, so its edge stays), t focused (scrolled
+            # flush, PEEK too far), k focused (no scroll) and t's width back (k's edge stays, t's
+            # outer edge moves PEEK in, the strip of the column beyond shows)
+            out.append([("f", k), ("w", t, w[t] + PEEK), ("f", t), ("f", k), ("w", t, w[t]), ("f", t)])
+    if n > 1:
+        out.append([("f", n - 1), ("c",), ("f", 0), ("f", t)])
+        out.append([("f", 0), ("c",), ("f", n - 1), ("f", t)])
+    return out
+
+
+def choose(w, V, a, t, W, xt):
+    """The first candidate that ends exactly at xt for column t moving the view one way only;
+    else the first that ends there at all; (None, None) when none does."""
+    exact = None
+    for c in candidates(w, t):
+        Vf, af, wf, path = sim(c, w, V, a, W)
+        if af != t or abs(colx(wf)[t] - Vf - xt) > TOL:
+            continue
+        if monotonic(V, path):
+            return c, Vf
+        exact = exact or (c, Vf)
+    return exact or (None, None)
+
+
+def execute(ops, cols, f, t, history=()):
+    """Send ops: focus and center ops in one write, a width change waited for, and, right after a
+    slide, sent only once it is over (changed during one, a column's edge shows moving inside the
+    screen). Focus ends on f (or t)."""
+    pending = []
+    slid = 0.0
+    w = [c[0]["layout"]["tile_size"][0] for c in cols]
+
+    def pick(k):
+        ids = [x["id"] for x in cols[k]]
+        if t["id"] in ids:
+            return t["id"]
+        return next((x for x in reversed(history) if x in ids), ids[0])
+
+    def flush():
+        nonlocal slid
+        if pending:
+            request(*pending)
+            slid = time.monotonic()
+            pending.clear()
+
+    widths_now = {}
+
+    def flush_widths():
+        if widths_now:
+            left = slid + anim_secs("horizontal-view-movement") + 0.02 - time.monotonic()
+            if left > 0:
+                time.sleep(left)    # changed during a slide, an edge shows moving the other way
+            set_widths({cols[k][0]["id"]: int(v) for k, v in widths_now.items()})
+            for k, v in widths_now.items():
+                w[k] = v
+            widths_now.clear()
+
+    for op in ops:
+        if op[0] == "w":
+            flush()
+            widths_now[op[1]] = op[2]       # widths next to each other go out together
+            continue
+        flush_widths()
+        if op[0] == "f":
+            pending.append(action("FocusWindow", id=pick(op[1])))
+        elif op[0] == "c":
+            pending.append(action("CenterColumn"))
+    flush_widths()
+    want = f["id"] if f else t["id"]
+    if f and f is not t:
+        pending.append(action("FocusWindow", id=want))
+    flush()
+    # niri ignores the last FocusWindow of a write now and then; on its own it goes through
+    for _ in range(3):
+        time.sleep(0.03)
+        now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
+        if now and now["id"] == want:
+            break
+        request(action("FocusWindow", id=want))
+
+
+def known_view(st, ws_id):
+    m = VIEW.get(ws_id)
+    cols = st.columns(ws_id)
+    w = [c[0]["layout"]["tile_size"][0] for c in cols]
+    if (not m or m["ids"] != st.signature(ws_id)[1] or len(m["w"]) != len(w)
+            or any(abs(a - b) > TOL for a, b in zip(m["w"], w))):
+        return None
+    return m["V"]
+
+
 def place(ws_id, history=(), settle=False, d=0, removed=False):
     """Put the view so the focused column shows whole, with a strip of its neighbour on every side
-    that has one, and no empty space on a side without one. niri has no "set view" action: it
-    scrolls only to a column that is not fully visible (flush with the edge it comes in from), or
-    centers one (center-column). niri also draws between the requests of one IPC write, so each
-    focus "hop" through another column can show as a frame of that view. So: as few hops as
-    possible, and only hops that scroll straight to the final view (the column hopped to ends up
-    where it must be, the focused one is then fully visible and does not move again):
-      fits on the screen     after a structure change: first column (it is cut on the left, or
-                             flush left already); on a focus move nothing
-      first or last column   nothing, niri puts it flush with its edge itself; when the last
-                             column was made narrower (niri keeps its left edge, which leaves an
-                             empty strip on the right) or a column was closed (niri keeps the view
-                             where it was) the other end, then back (the one case with a hop
-                             that goes the other way first)
-      full width column      center-column: W-2G-2P wide, both strips show
-      half, with a half on its right that fills the screen with it     right neighbour, then back: [L strip][column][R]
-      half, with a half on its left that fills the screen with it      left neighbour, then back:  [L][column][R strip]
-      (when both fit, the side being moved towards wins)
-      otherwise              center-column (the neighbour on that side is not a half)
-    d is the direction of the focus move (-1 left, 1 right, 0 none: a structure change).
-    With a floating window focused, the tiled window focused last is used and focus goes back.
-    settle (columns other than the focused one were removed, so a lone column can sit fully
-    visible away from the left edge, which no scrolling action changes): its window goes to
-    floating and back, and niri puts it at the left edge. (Several narrow columns that fit, fully
-    visible away from the edge, stay where they are: making the first one full width and back
-    moved the view only for a lone column, and showed that width for a few frames.)"""
+    that has one and no empty space on a side without one (target_x), in one movement (choose)."""
     st = State()
     if st.focused_ws != ws_id:
         return False
@@ -175,8 +382,40 @@ def place(ws_id, history=(), settle=False, d=0, removed=False):
     t = f if f and f["id"] in tiled else next((tiled[i] for i in reversed(history) if i in tiled), None)
     size = st.size(ws_id)
     if not t or not size or classify(t, *size) == "edges":
+        VIEW.pop(ws_id, None)
         return False
     W, H = size
+    ti = t["layout"]["pos_in_scrolling_layout"][0] - 1
+    w = [c[0]["layout"]["tile_size"][0] for c in cols]
+    n = len(cols)
+    V = known_view(st, ws_id)
+    if V is None:
+        return place_blind(st, ws_id, cols, f, t, history, settle, d, removed)
+    xt = target_x(w, ti, W, d, colx(w)[ti] - V)
+    ops, Vf = choose(w, V, ti, ti, W, xt)
+    dbg("place t", t["id"], "V", V, "xt", xt, "ops", ops)
+    if ops is None and n == 1 and len(cols[0]) == 1:
+        # a lone column away from the left edge, fully visible: no scroll moves it. Out to
+        # floating and back in: niri puts it at the left edge (drawn once 4 px off, same size)
+        request(action("ToggleWindowFloating", id=t["id"]), action("ToggleWindowFloating", id=t["id"]))
+        VIEW[ws_id] = {"ids": st.signature(ws_id)[1], "w": w, "a": 0, "V": -G}
+        return True
+    if ops is None:
+        return place_blind(st, ws_id, cols, f, t, history, settle, d, removed)
+    if ops or (f and f is not t):
+        now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
+        if (now and now["id"]) != (f and f["id"]):
+            return False            # the user moved on meanwhile: the next event does it
+        execute(ops, cols, f, t, history)
+    _, _, wf, _ = sim(ops, w, V, ti, W)
+    VIEW[ws_id] = {"ids": st.signature(ws_id)[1], "w": wf, "a": ti, "V": Vf}
+    return True
+
+
+def place_blind(st, ws_id, cols, f, t, history, settle, d, removed):
+    """Without a known view: hops that are right in the usual cases; the view is taken as placed
+    afterwards."""
+    W, H = st.size(ws_id)
     i = t["layout"]["pos_in_scrolling_layout"][0] - 1
     w = [c[0]["layout"]["tile_size"][0] for c in cols]
     n = len(cols)
@@ -186,54 +425,99 @@ def place(ws_id, history=(), settle=False, d=0, removed=False):
         return next((x for x in reversed(history) if x in ids), ids[0])
 
     two = W - 2 * G - PEEK
-    pair = lambda a, b: 0 <= a and b < n and abs(w[a] + G + w[b] - two) < TOL
     go = lambda wid: action("FocusWindow", id=wid)
+    fits = sum(w) + (n + 1) * G <= W + TOL
     hops = []
-    if sum(w) + (n + 1) * G <= W + TOL:
-        if d == 0:
-            first = pick(cols[0])
-            hops = [go(first)]
-            if settle and n > 1 and W / 2 - w[-1] / 2 - (sum(w[:-1]) + (n - 1) * G) < 0:
-                hops = [action("FocusColumnLast"), action("CenterColumn"), go(first)]
-            elif settle and n == 1 and len(cols[0]) == 1:
-                hops += [action("ToggleWindowFloating", id=first), action("ToggleWindowFloating", id=first)]
+    if fits:
+        first = pick(cols[0])
+        hops = [go(first)]
+        if settle and n > 1 and W / 2 - w[-1] / 2 - (sum(w[:-1]) + (n - 1) * G) < 0:
+            hops = [action("FocusColumnLast"), action("CenterColumn"), go(first)]
+        elif settle and n == 1 and len(cols[0]) == 1:
+            hops += [action("ToggleWindowFloating", id=first), action("ToggleWindowFloating", id=first)]
     elif i == n - 1 and n > 1 and (removed or time.monotonic() - LAST_SHRINK.get(cols[i][0]["id"], -9) < 2):
         hops = [action("FocusColumnFirst")]
     elif i == 0 and n > 1 and removed:
         hops = [action("FocusColumnLast")]
-    elif i in (0, n - 1):
-        pass
-    elif w[i] >= two - TOL:
-        hops = [action("CenterColumn")]
-    elif pair(i, i + 1) and (d >= 0 or not pair(i - 1, i)):
-        hops = [go(pick(cols[i + 1]))]
-    elif pair(i - 1, i):
-        hops = [go(pick(cols[i - 1]))]
-    else:
-        hops = [action("CenterColumn")]
-    if not hops:
-        return True
-    reqs = [action("FocusTiling")] + hops
-    if hops[0] != action("CenterColumn"):
-        reqs.append(go(t["id"]))
-    if f and f is not t and f["workspace_id"] == ws_id:
-        reqs.append(go(f["id"]))
-    now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
-    if (now and now["id"]) != (f and f["id"]):
-        return False
-    request(*reqs)
-    want = f["id"] if f and f is not t else t["id"]
-    for _ in range(3):
-        time.sleep(0.05)
+    elif 0 < i < n - 1:
+        xt = target_x(w, i, W, d)
+        if abs(xt - (W - w[i]) / 2) < TOL:
+            hops = [action("CenterColumn")]
+        elif abs(xt - (G + PEEK)) < TOL:
+            hops = [go(pick(cols[i + 1]))]
+        elif abs(xt - (G + w[i - 1] + G)) < TOL:
+            hops = [go(pick(cols[i - 1]))]
+        else:
+            hops = [action("CenterColumn")]
+    dbg("blind t", t["id"], "i", i, "n", n, "w", w, "hops", hops)
+    if hops:
+        reqs = [action("FocusTiling")] + hops
+        if hops[-1] != action("CenterColumn"):
+            reqs.append(go(t["id"]))
+        if f and f is not t and f["workspace_id"] == ws_id:
+            reqs.append(go(f["id"]))
         now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
-        if now and now["id"] == want:
-            break
-        request(go(want))
+        if (now and now["id"]) != (f and f["id"]):
+            return False
+        request(*reqs)
+        want = f["id"] if f and f is not t else t["id"]
+        for _ in range(3):
+            time.sleep(0.05)
+            now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
+            if now and now["id"] == want:
+                break
+            request(go(want))
+    # from here on the view is taken to be where it was meant to go
+    st2 = State()
+    cols2 = st2.columns(ws_id)
+    w2 = [c[0]["layout"]["tile_size"][0] for c in cols2]
+    i2 = next((k for k, c in enumerate(cols2) if t["id"] in [x["id"] for x in c]), None)
+    if i2 is None or (fits and settle and n > 1 and len(hops) == 1):
+        VIEW.pop(ws_id, None)       # narrow columns that fit may have stayed away from the edge
+    else:
+        VIEW[ws_id] = {"ids": st2.signature(ws_id)[1], "w": w2, "a": i2,
+                       "V": colx(w2)[i2] - target_x(w2, i2, W, d)}
     return True
 
+
+def anim_secs(name):
+    """Length of one of niri's animations from config.kdl (slowdown applied), 0 when off."""
+    try:
+        text = open(os.path.expanduser("~/.config/niri/config.kdl")).read()
+        block = re.search(r"^animations \{\n(.*?)^\}", text, re.M | re.S).group(1)
+    except (OSError, AttributeError):
+        return 0.15
+    slow = float((re.search(r"^\s*slowdown\s+([0-9.]+)", block, re.M) or [0, 1])[1])
+    m = re.search(r"^\s*%s\s*\{(.*?)\}" % re.escape(name), block, re.M | re.S)
+    if not m or re.search(r"\boff\b", m.group(1)):
+        return 0.0
+    d = re.search(r"duration-ms\s+(\d+)", m.group(1))
+    return (int(d.group(1)) / 1000 if d else 0.3) * slow
+
+
+CMD_SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "niri-layout.sock")
 KEY_MARK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "niri-layout.key")
 
+
 def key(which):
+    """Mod+F / Mod+Shift+F: done by the daemon, which knows the view; alone if it does not run."""
+    try:
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(5)
+        s.connect(CMD_SOCK)
+        s.sendall(which.encode() + b"\n")
+        s.recv(16)
+        s.close()
+    except OSError:
+        key_run(which)
+
+
+def dbg(*a):
+    if os.environ.get("NIRI_LAYOUT_DEBUG"):
+        print(*a, file=sys.stderr, flush=True)
+
+
+def key_run(which, history=()):
     st = State()
     f = st.focused
     fallback = "MaximizeColumn" if which == "full" else "MaximizeWindowToEdges"
@@ -242,17 +526,131 @@ def key(which):
         request(action(fallback) if which == "full" else action(fallback, id=None))
         return
     W, H = size
+    ws = f["workspace_id"]
     cls = classify(f, W, H)
     if cls == "edges" and f["layout"]["tile_size"][1] >= H - 0.5:
         request(action(fallback) if which == "full" else action(fallback, id=None))
         return
+    open(KEY_MARK, "w").close()     # these widths are not a change by hand
     if which == "edges" and cls != "edges":
         request(action("MaximizeWindowToEdges", id=f["id"]))
         return
     new = "half" if (which == "full" and cls == "full") else "full"
-    open(KEY_MARK, "w").close()
-    relayout(st, f["workspace_id"], {f["id"]: new})
-    place(f["workspace_id"])
+    if cls == "edges":
+        # leaving edge to edge: niri unmaximizes and slides the view back where it was before;
+        # placed after that slide, or niri's slide undoes it
+        relayout(st, ws, {f["id"]: new})
+        time.sleep(anim_secs("horizontal-view-movement") + 0.05)
+        VIEW.pop(ws, None)
+        place(ws, history)
+        return
+    new = "half" if (which == "full" and cls == "full") else "full"
+    cols = st.columns(ws)
+    w = [c[0]["layout"]["tile_size"][0] for c in cols]
+    t = f["layout"]["pos_in_scrolling_layout"][0] - 1
+    V = known_view(st, ws) if cls != "edges" else None
+    dbg("key", which, "t", f["id"], "V", V, "view", VIEW.get(ws), "sig", st.signature(ws)[1])
+    plan, fits = plan_widths(st, ws, {f["id"]: new})
+    for p in plan:
+        if p[2] is not None and p[2] < p[1] - TOL and p[1] < W - 0.5:
+            LAST_SHRINK[p[0]["id"]] = time.monotonic()
+    if V is None:
+        relayout(st, ws, {f["id"]: new})
+        place(ws, history)
+        return
+    # the new widths and the view in one movement: the widths first, or one step before them
+    # (focus a neighbour first), or, for the last column going full -> half, whose right edge
+    # has to stay while the column on its left comes in: the left neighbour made wider off
+    # screen, focused (the view slides right, exactly to where the column will start), the column
+    # narrowed (its right part is off screen), focused (fully visible: no scroll), the neighbour
+    # narrowed back (its right edge stays, the strip of the one before it shows)
+    nw = [p[2] if p[2] is not None else w[k] for k, p in enumerate(plan)]
+    wops = [("w", t, nw[t])] + [("w", k, nw[k]) for k in range(len(w)) if k != t and abs(nw[k] - w[k]) >= TOL]
+    xt = target_x(nw, t, W)
+    near = [k for k in (t + 1, t - 1) if 0 <= k < len(w)]
+    tries = ([wops] + [[("f", k), ("f", t)] + wops for k in near]      # scroll first, then widths
+             + [[("f", k)] + wops + [("f", t)] for k in near])         # widths beside k, then scroll
+    if t > 0 and xt - 2 * G > nw[t - 1]:
+        L = t - 1
+        tries.append([("w", L, xt - 2 * G), ("f", L)] + [o for o in wops if o[1] != L] + [("f", t), ("w", L, nw[L])])
+    best, best_one_way = None, None
+    for pre in tries:
+        Vp, ap, wp, _ = sim(pre, w, V, t, W)
+        if ap != t:
+            continue
+        rest, _ = choose(wp, Vp, ap, t, W, xt)
+        if rest is None:
+            continue
+        ops = pre + rest
+        Vf, af, wf, path = sim(ops, w, V, t, W)
+        if any(abs(wf[k] - nw[k]) >= TOL for k in range(len(w))):
+            continue
+        score = (reversals(ops, w, V, t, W), jumps(path), sum(abs(d) for d in path))
+        if monotonic(V, path) and (best_one_way is None or score < best_one_way[0]):
+            best_one_way = (score, ops)
+        best = best or ops
+    if best_one_way:
+        best = best_one_way[1]
+    if best is None:
+        relayout(st, ws, {f["id"]: new})
+        place(ws, history)
+        return
+    dbg("key ops", best)
+    execute(best, cols, f, f, history)
+    Vf, af, wf, _ = sim(best, w, V, t, W)
+    VIEW[ws] = {"ids": st.signature(ws)[1], "w": wf, "a": t, "V": Vf}
+
+
+def view_follow(st, ws):
+    """Carry the known view of a workspace over what niri did by itself since: another column
+    focused, widths changed (by hand, or by a window), one column opened or closed. Dropped when
+    it is anything else."""
+    old = VIEW.get(ws)
+    size = st.size(ws)
+    if not old or not size:
+        VIEW.pop(ws, None)
+        return
+    W = size[0]
+    cols = st.columns(ws)
+    ids = st.signature(ws)[1]
+    w = [c[0]["layout"]["tile_size"][0] for c in cols]
+    if any(v >= W - 0.5 for v in w):
+        VIEW.pop(ws, None)          # edge to edge or fullscreen: niri's own view, back after it
+        return
+    act = st.workspaces[ws].get("active_window_id")
+    a = next((k for k, c in enumerate(cols) if act in [x["id"] for x in c]), None)
+    if a is None:
+        VIEW.pop(ws, None)
+        return
+    oids, ow, V, oa = list(old["ids"]), list(old["w"]), old["V"], old["a"]
+    oset, nset = [frozenset(c) for c in oids], [frozenset(c) for c in ids]
+    if oset != nset:
+        if [c for c in oset if c in nset] != [c for c in nset if c in oset]:
+            VIEW.pop(ws, None)      # moved, consumed, expelled: not followed
+            return
+        gone = [k for k, c in enumerate(oset) if c not in nset]
+        added = [k for k, c in enumerate(nset) if c not in oset]
+        if len(gone) + len(added) != 1:
+            VIEW.pop(ws, None)
+            return
+        if gone:
+            g = gone[0]
+            if g != oa:             # another column closed: the focused one stays on screen
+                before = colx(ow)[oa]
+                del ow[g]
+                oa -= g < oa
+                V += colx(ow)[oa] - before
+            else:                   # the focused one: the view stays, its neighbour takes its place
+                del ow[g]
+                oa = min(g, len(ow) - 1)
+        else:                       # a new column, put next to the focused one: nothing moves yet
+            j = added[0]
+            ow.insert(j, w[j])
+            oa += j <= oa
+    ops = [("w", k, w[k]) for k in range(len(w)) if abs(ow[k] - w[k]) >= TOL] + [("f", a)]
+    V, a, _, _ = sim(ops, ow, V, oa, W)
+    VIEW[ws] = {"ids": ids, "w": w, "a": a, "V": V}
+
 
 def own_widths(st, own, skip=()):
     """Remember the class of every window that has a column to itself (a pixel width for "other",
@@ -276,6 +674,7 @@ def key_recent():
     except OSError:
         return False
 
+
 def daemon():
     q = queue.Queue()
 
@@ -291,6 +690,26 @@ def daemon():
         q.put(None)
 
     threading.Thread(target=reader, daemon=True).start()
+
+    def commands():
+        try:
+            os.unlink(CMD_SOCK)
+        except OSError:
+            pass
+        srv = socket.socket(socket.AF_UNIX)
+        srv.bind(CMD_SOCK)
+        srv.listen(4)
+        while True:
+            conn, _ = srv.accept()
+            try:
+                cmd = conn.makefile("r").readline().strip()
+            except OSError:
+                conn.close()
+                continue
+            q.put({"Command": cmd, "conn": conn})
+
+    threading.Thread(target=commands, daemon=True).start()
+    held = []   # a key command that came during a burst of events, done right after it
 
     st = State()
     known = {w["id"] for w in st.windows}
@@ -318,12 +737,39 @@ def daemon():
     wsw = (st.focused_ws, col_widths(st))
     replace_at = None
 
+    def run_command(ev):
+        nonlocal last_focus, wsw
+        try:
+            if ev["Command"] in ("full", "edges"):
+                st = State()
+                for ws in list(VIEW):
+                    view_follow(st, ws)
+                key_run(ev["Command"], history)
+        except Exception:
+            import traceback
+            traceback.print_exc()   # a key that went wrong is not to stop the daemon
+            VIEW.clear()
+        finally:
+            try:
+                ev["conn"].sendall(b"ok\n")
+                ev["conn"].close()
+            except OSError:
+                pass
+        st = State()
+        last_focus = st.focused and st.focused["id"]
+        wsw = (st.focused_ws, col_widths(st))
+
     while True:
+        if held:
+            run_command(held.pop(0))
+            continue
         try:
             ev = q.get(timeout=None if replace_at is None else max(0, replace_at - time.monotonic()))
         except queue.Empty:
             replace_at = None
             st = State()
+            for ws in list(VIEW):
+                view_follow(st, ws)
             f = st.focused
             if f and not f["is_floating"] and f["workspace_id"] == st.focused_ws:
                 place(st.focused_ws, history)
@@ -332,6 +778,9 @@ def daemon():
             continue
         if ev is None:
             sys.exit(0)
+        if "Command" in ev:
+            run_command(ev)
+            continue
         evs = [ev]
         deadline = time.monotonic() + 0.3
         while time.monotonic() < deadline:
@@ -344,6 +793,9 @@ def daemon():
                 break
             if ev is None:
                 sys.exit(0)
+            if "Command" in ev:
+                held.append(ev)
+                break
             evs.append(ev)
         for e in evs:
             fid = (e.get("WindowFocusChanged") or {}).get("id")
@@ -356,6 +808,8 @@ def daemon():
                 history.append(fid)
 
         st = State()
+        for ws in list(VIEW):
+            view_follow(st, ws)
         ids = {w["id"] for w in st.windows}
         byid = {w["id"]: w for w in st.windows}
         acted = False
@@ -397,7 +851,9 @@ def daemon():
             if gone:
                 removed.add(ws)
             sigs[ws] = sig
-            changed |= relayout(st, ws, new)
+            if relayout(st, ws, new):
+                changed = True
+                view_follow(State(), ws)
             dirty.add(ws)
         for ws in list(sigs):
             if ws not in st.workspaces:
