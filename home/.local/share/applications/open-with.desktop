@@ -4,4 +4,3 @@ Name=Open With
 Exec=open-with %f
 Terminal=false
 NoDisplay=true
-MimeType=application/octet-stream;

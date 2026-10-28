@@ -10,9 +10,7 @@ def activate(app):
     dialog = Gtk.AppChooserDialog.new(win, 0, f)
     dialog.set_heading("Open With")
     widget = dialog.get_widget()
-    widget.set_show_recommended(False)
     widget.set_show_default(False)
-    widget.set_show_all(True)
     def done(d, response):
         if response == Gtk.ResponseType.OK:
             info = d.get_app_info()

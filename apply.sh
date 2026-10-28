@@ -287,6 +287,11 @@ EOF
         niri msg action load-config-file >/dev/null 2>&1 || true
         done_ "Sushi preview opens centered (updated)"
     else done_ "Sushi preview opens centered"; fi
+    if [ -f "$nc" ] && ! grep -q '\^open-with\$' "$nc"; then
+        printf '%s\n' 'window-rule {' '    match app-id=r#"^open-with$"#' '    open-floating true' '    default-column-width { fixed 640; }' '    default-window-height { fixed 520; }' '}' >> "$nc"
+        niri msg action load-config-file >/dev/null 2>&1 || true
+        done_ "Open With dialog opens centered (updated)"
+    else done_ "Open With dialog opens centered"; fi
     if [ -f "$nc" ] && grep -q '^animations {$' "$nc"; then
         if python3 -I - "$nc" <<'EOF'
 import re, sys
