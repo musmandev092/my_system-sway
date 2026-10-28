@@ -298,16 +298,17 @@ import re, sys
 p = sys.argv[1]; s = old = open(p).read()
 s = re.sub(r"    // minimal: every niri animation runs at double speed\n    slowdown 0\.5\n", "", s)
 s = s.replace("    // minimal, close to sway: windows open/close instantly, the rest ~3x faster\n", "")
-note = ("    // minimal: short ease-out open, close, scroll and move (slowdown 0.35 makes them 90, 70, 100, 100 ms),\n"
-        "    // resize instant (niri-layout sets widths); workspaces and the overview slide fast, no overshoot\n")
+note = ("    // minimal: short ease-out open and close (slowdown 0.35 makes them 90 and 70 ms); scroll, move and\n"
+        "    // resize are instant (niri-layout moves the view and sets widths); workspaces and the overview slide fast\n")
 if note not in s:
     s = s.replace("animations {\n", "animations {\n" + note, 1)
 if "\n    slowdown 0.35\n" not in s:
     s = s.replace(note, note + "    slowdown 0.35\n", 1)
 block = r"    %s \{(?:\n(?:        [^\n]*\n)*?    \}|[^\n]*\})\n"
-for name, ms in (("window-open", 257), ("window-close", 200), ("horizontal-view-movement", 286), ("window-movement", 286)):
+for name, ms in (("window-open", 257), ("window-close", 200)):
     s = re.sub(block % name, '    %s {\n        duration-ms %d\n        curve "ease-out-quad"\n    }\n' % (name, ms), s, count=1)
-s = re.sub(block % "window-resize", "    window-resize { off; }\n", s, count=1)
+for name in ("window-resize", "window-movement", "horizontal-view-movement"):
+    s = re.sub(block % name, "    %s { off; }\n" % name, s, count=1)
 for name, stiff in (("workspace-switch", 1000), ("overview-open-close", 800)):
     s = re.sub(r"(    %s \{\n        spring )damping-ratio=[0-9.]+ stiffness=\d+" % name,
                r"\g<1>damping-ratio=1.0 stiffness=%d" % stiff, s, count=1)
