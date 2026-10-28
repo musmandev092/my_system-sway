@@ -434,6 +434,8 @@ PYEOF
         || note "dconf is not installed: light/dark settings are lost (add it to the system packages)"
     link home/.local/bin/gtk-theme-follow .local/bin/gtk-theme-follow
     link home/.local/bin/focus-or-run .local/bin/focus-or-run
+    link home/.local/bin/open-with .local/bin/open-with
+    link home/.local/share/applications/open-with.desktop .local/share/applications/open-with.desktop
     link home/.local/bin/screenshot-notify .local/bin/screenshot-notify
     link home/.local/share/applications/btop.desktop .local/share/applications/btop.desktop
     link home/.config/systemd/user/gtk-theme-follow.service .config/systemd/user/gtk-theme-follow.service
@@ -451,6 +453,12 @@ PYEOF
         sed -E "s|^Exec=/usr/bin/onlyoffice-desktopeditors|Exec=$HOME/.local/bin/onlyoffice-run --system-title-bar|" "$sd" > "$ud.new"
         if cmp -s "$ud.new" "$ud"; then rm -f "$ud.new"; done_ "OnlyOffice launcher (--system-title-bar)"
         else mv "$ud.new" "$ud"; done_ "OnlyOffice launcher (--system-title-bar, updated)"; fi
+    fi
+    if [ "$(xdg-mime query default application/octet-stream 2>/dev/null)" = open-with.desktop ]; then
+        done_ "unknown files ask which app to open with"
+    else
+        xdg-mime default open-with.desktop application/octet-stream \
+            && done_ "unknown files ask which app to open with (updated)" || note "could not set the handler for unknown files"
     fi
     systemctl --user daemon-reload
     if systemctl --user -q is-enabled gtk-theme-follow.service && systemctl --user -q is-active gtk-theme-follow.service; then

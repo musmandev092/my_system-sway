@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+import sys
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk, Gio
+
+def activate(app):
+    f = Gio.File.new_for_commandline_arg(sys.argv[1])
+    win = Gtk.ApplicationWindow(application=app)
+    dialog = Gtk.AppChooserDialog.new(win, 0, f)
+    dialog.set_heading("Open With")
+    def done(d, response):
+        if response == Gtk.ResponseType.OK:
+            d.get_app_info().launch([f], None)
+        d.destroy()
+        app.quit()
+    dialog.connect("response", done)
+    dialog.present()
+
+app = Gtk.Application(application_id="local.OpenWith", flags=Gio.ApplicationFlags.NON_UNIQUE)
+app.connect("activate", activate)
+app.run([sys.argv[0]])
