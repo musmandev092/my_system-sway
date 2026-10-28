@@ -155,8 +155,9 @@ def place(ws_id, history=(), settle=False, d=0, removed=False):
                              where it was) the other end, then back (the one case with a hop
                              that goes the other way first)
       full width column      center-column: W-2G-2P wide, both strips show
-      half moving right      right neighbour, then back: [L strip][column][R]
-      half moving left       left neighbour, then back:  [L][column][R strip]
+      half, with a half on its right that fills the screen with it     right neighbour, then back: [L strip][column][R]
+      half, with a half on its left that fills the screen with it      left neighbour, then back:  [L][column][R strip]
+      (when both fit, the side being moved towards wins)
       otherwise              center-column (the neighbour on that side is not a half)
     d is the direction of the focus move (-1 left, 1 right, 0 none: a structure change).
     With a floating window focused, the tiled window focused last is used and focus goes back.
@@ -204,11 +205,9 @@ def place(ws_id, history=(), settle=False, d=0, removed=False):
         pass
     elif w[i] >= two - TOL:
         hops = [action("CenterColumn")]
-    elif d >= 0 and pair(i, i + 1):
+    elif pair(i, i + 1) and (d >= 0 or not pair(i - 1, i)):
         hops = [go(pick(cols[i + 1]))]
-    elif d <= 0 and pair(i - 1, i):
-        hops = [go(pick(cols[i - 1]))]
-    elif d == 0 and pair(i - 1, i):
+    elif pair(i - 1, i):
         hops = [go(pick(cols[i - 1]))]
     else:
         hops = [action("CenterColumn")]
