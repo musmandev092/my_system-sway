@@ -305,8 +305,9 @@ if note not in s:
 if "\n    slowdown 0.35\n" not in s:
     s = s.replace(note, note + "    slowdown 0.35\n", 1)
 block = r"    %s \{(?:\n(?:        [^\n]*\n)*?    \}|[^\n]*\})\n"
-for name, ms in (("window-open", 257), ("window-close", 200), ("horizontal-view-movement", 286), ("window-movement", 286), ("window-resize", 286), ("workspace-switch", 286)):
+for name, ms in (("window-open", 257), ("window-close", 200), ("horizontal-view-movement", 286), ("window-movement", 286), ("window-resize", 286)):
     s = re.sub(block % name, '    %s {\n        duration-ms %d\n        curve "ease-out-quad"\n    }\n' % (name, ms), s, count=1)
+s = re.sub(block % "workspace-switch", '    workspace-switch {\n        spring damping-ratio=1.0 stiffness=1000 epsilon=0.0001\n    }\n', s, count=1)
 for name, stiff in (("overview-open-close", 800),):
     s = re.sub(r"(    %s \{\n        spring )damping-ratio=[0-9.]+ stiffness=\d+" % name,
                r"\g<1>damping-ratio=1.0 stiffness=%d" % stiff, s, count=1)

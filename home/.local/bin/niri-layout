@@ -689,7 +689,113 @@ def key_recent():
         return False
 
 
+def patch_dms_media():
+    """Patch DMS's extracted runtime QML so Chromium/Brave players control their PipeWire stream
+    volume (or sink fallback) instead of Chromium's no-op MPRIS Volume property."""
+    import subprocess
+    rt = os.environ.get("XDG_RUNTIME_DIR") or ("/run/user/%d" % os.getuid())
+    for _ in range(15):
+        dirs = glob.glob(os.path.join(rt, "dms-shell/*"))
+        if dirs:
+            break
+        time.sleep(1.0)
+    changed = False
+    for d in glob.glob(os.path.join(rt, "dms-shell/*")):
+        if not os.path.isdir(d):
+            continue
+        p = os.path.join(d, "Services/AudioService.qml")
+        if os.path.exists(p):
+            s = old = open(p).read()
+            t = '    function isOwnStream(node) {\n        return !!node?.isStream && node.name === "quickshell";\n    }'
+            h = t + '''\n\n    function isChromiumPlayer(player) {
+        if (!player) return false;
+        const id = (player.identity || "").toLowerCase(), bus = (player.dbusName || "").toLowerCase();
+        return id.includes("chrome") || id.includes("chromium") || id.includes("brave") || bus.includes(".brave.") || bus.includes(".chromium.") || bus.includes(".chrome.");
+    }
+    function playerStreams(player) {
+        if (!player) return [];
+        const id = (player.identity || "").toLowerCase();
+        const bus = (player.dbusName || "").toLowerCase().replace(/^org\\.mpris\\.mediaplayer2\\./, "").split(".")[0];
+        const token = bus || id.split(/\\s+/)[0];
+        if (!token) return [];
+        return (root.pipewireNodes || []).filter(node => {
+            if (!node?.audio || !node.isSink || !node.isStream || root.isOwnStream(node)) return false;
+            const name = (node.name || "").toLowerCase(), app = (node.properties?.["application.name"] || "").toLowerCase(), bin = (node.properties?.["application.process.binary"] || "").toLowerCase();
+            return name.includes(token) || app.includes(token) || bin.includes(token) || (name.length > 0 && id.includes(name.split(/\\s+/)[0]));
+        });
+    }'''
+            if "function playerStreams(" not in s and t in s:
+                s = s.replace(t, h, 1)
+            if s != old:
+                os.chmod(os.path.dirname(p), 0o755); os.chmod(p, 0o644); open(p, "w").write(s); changed = True
+        p = os.path.join(d, "Modules/DDash/MediaPlayerTab.qml")
+        if os.path.exists(p):
+            s = old = open(p).read()
+            ob = '''    readonly property bool __isChromeBrowser: {
+        if (!activePlayer?.identity)
+            return false;
+        const id = activePlayer.identity.toLowerCase();
+        return id.includes("chrome") || id.includes("chromium");
+    }
+    readonly property bool volumeAvailable: !!((activePlayer && activePlayer.volumeSupported && !__isChromeBrowser) || (AudioService.sink && AudioService.sink.audio))
+    readonly property bool usePlayerVolume: activePlayer && activePlayer.volumeSupported && !__isChromeBrowser
+    readonly property real reportedVolume: usePlayerVolume ? activePlayer.volume : (AudioService.sink?.audio?.volume ?? 0)'''
+            nb = '''    readonly property bool __isChromeBrowser: AudioService.isChromiumPlayer(activePlayer)
+    readonly property var playerStreams: __isChromeBrowser ? AudioService.playerStreams(activePlayer) : []
+    readonly property var playerStreamAudio: playerStreams.length > 0 ? playerStreams[0].audio : null
+    readonly property bool volumeAvailable: !!((activePlayer && activePlayer.volumeSupported && !__isChromeBrowser) || playerStreamAudio || (AudioService.sink && AudioService.sink.audio))
+    readonly property bool usePlayerVolume: !!(activePlayer && ((activePlayer.volumeSupported && !__isChromeBrowser) || playerStreamAudio))
+    readonly property real reportedVolume: playerStreamAudio ? (playerStreamAudio.muted ? 0 : playerStreamAudio.volume) : (usePlayerVolume ? activePlayer.volume : (AudioService.sink?.audio?.volume ?? 0))'''
+            oset = '''        if (usePlayerVolume) {
+            pendingVolume = clamped;
+            pendingVolumeTimer.restart();
+            activePlayer.volume = clamped;
+            return;
+        }'''
+            nset = '''        if (playerStreamAudio) {
+            pendingVolume = clamped;
+            pendingVolumeTimer.restart();
+            for (let i = 0; i < playerStreams.length; i++) {
+                const a = playerStreams[i]?.audio;
+                if (a) { a.volume = clamped; a.muted = clamped === 0; }
+            }
+            return;
+        }
+''' + oset
+            if "playerStreamAudio" not in s and ob in s:
+                s = s.replace(ob, nb, 1).replace(oset, nset, 1)
+            if s != old:
+                os.chmod(os.path.dirname(p), 0o755); os.chmod(p, 0o644); open(p, "w").write(s); changed = True
+        p = os.path.join(d, "Modules/DBar/Widgets/Media.qml")
+        if os.path.exists(p):
+            s = old = open(p).read()
+            om = '''    readonly property bool __isChromeBrowser: {
+        if (!activePlayer?.identity)
+            return false;
+        const id = activePlayer.identity.toLowerCase();
+        return id.includes("chrome") || id.includes("chromium");
+    }
+    readonly property bool usePlayerVolume: activePlayer && activePlayer.volumeSupported && !__isChromeBrowser'''
+            nm = '''    readonly property bool __isChromeBrowser: AudioService.isChromiumPlayer(activePlayer)
+    readonly property var playerStreams: __isChromeBrowser ? AudioService.playerStreams(activePlayer) : []
+    readonly property var playerStreamAudio: playerStreams.length > 0 ? playerStreams[0].audio : null
+    readonly property bool usePlayerVolume: !!(activePlayer && ((activePlayer.volumeSupported && !__isChromeBrowser) || playerStreamAudio))'''
+            if "playerStreamAudio" not in s and om in s:
+                s = s.replace(om, nm, 1).replace(
+                    "const currentVolume = activePlayer.volume * 100;",
+                    "const currentVolume = (playerStreamAudio ? (playerStreamAudio.muted ? 0 : playerStreamAudio.volume) : activePlayer.volume) * 100;", 1
+                ).replace(
+                    "activePlayer.volume = newVolume / 100;",
+                    "if (playerStreamAudio) { for (let i = 0; i < playerStreams.length; i++) { playerStreams[i].audio.volume = newVolume / 100; playerStreams[i].audio.muted = newVolume === 0; } } else { activePlayer.volume = newVolume / 100; }", 1
+                )
+            if s != old:
+                os.chmod(os.path.dirname(p), 0o755); os.chmod(p, 0o644); open(p, "w").write(s); changed = True
+    if changed:
+        subprocess.run(["systemctl", "--user", "reload", "dms.service"], check=False)
+
+
 def daemon():
+    threading.Thread(target=patch_dms_media, daemon=True).start()
     q = queue.Queue()
 
     def reader():
