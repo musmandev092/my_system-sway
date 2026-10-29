@@ -6,7 +6,7 @@ me=$$
 start() { sed "s/.*) //" "/proc/$1/stat" 2>/dev/null | cut -d" " -f20; }
 (
     t=$(start "$me")
-    while [ -e "/proc/$host" ] && [ "$(start "$me")" = "$t" ]; do sleep 0.5; done
+    while [ -e "/proc/$host" ] && [ -e "/proc/$me" ]; do sleep 0.5; done
     [ "$(start "$me")" = "$t" ] || exit 0
     kill -HUP "$me" 2>/dev/null
     sleep 3

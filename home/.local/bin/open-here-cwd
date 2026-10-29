@@ -1,127 +1,246 @@
-#!/bin/bash
-fallback() { printf '%s\n' "$HOME"; exit 0; }
+#!/usr/bin/python3 -IS
+"""Print the working directory of the focused window for Open Here ($HOME when unknown).
+Only C-builtin imports: json, re, glob, urllib and subprocess each add 3-10 ms of startup."""
+import _json, _socket, os, sys
 
-info=$(timeout 3 python3 -I -c '
-import json, subprocess
-def niri(*a):
-    try: return json.loads(subprocess.run(["niri", "msg", "-j", *a], capture_output=True, text=True).stdout)
-    except Exception: return None
-w = niri("focused-window")
-if not w:
-    act = [s.get("active_window_id") for s in niri("workspaces") or [] if s.get("is_focused")]
-    w = next((x for x in niri("windows") or [] if act and x.get("id") == act[0]), None) or {}
-print(w.get("app_id") or ""); print(w.get("pid") or ""); print(w.get("id") or ""); print((w.get("title") or "").replace("\n", " "))
-' 2>/dev/null) || fallback
-{ read -r app; read -r wpid; read -r wid; read -r title; } <<<"$info"
+HOME = os.path.expanduser("~")
+SHELLS = {"bash", "zsh", "fish", "sh", "dash", "ksh", "nu", "tcsh"}
+TERMS = {"org.gnome.Ptyxis", "org.gnome.Console", "kgx", "foot", "footclient", "kitty", "Alacritty",
+         "com.mitchellh.ghostty", "org.wezfurlong.wezterm", "xterm"}
 
-case "$app" in
-    cursor|Cursor|org.gnome.Nautilus|com.anthropic.Claude)
-        py=$(cat <<'PYEOF'
-import glob, json, os, re, subprocess, sys
-from urllib.parse import unquote, urlparse
-app, pid, wid, title = sys.argv[1:]
-home = os.path.expanduser("~")
 
-def path(uri):
-    u = urlparse(uri or "")
-    p = unquote(u.path) if u.scheme == "file" and u.netloc in ("", "localhost") else None
-    return p if p and os.path.isdir(p) else None
+class _Ctx:
+    strict = True
+    object_hook = object_pairs_hook = parse_constant = None
+    parse_float, parse_int = float, int
+
+
+_scan = _json.make_scanner(_Ctx)
+
+
+def loads(b):
+    return _scan(b.decode(), 0)[0]
+
+
+_sock, _buf = None, b""
+
+
+def niri(req):
+    global _sock, _buf
+    if _sock is None:
+        _sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        _sock.settimeout(2)
+        _sock.connect(os.environ["NIRI_SOCKET"])
+    _sock.sendall(b'"%s"\n' % req.encode())
+    while b"\n" not in _buf:
+        c = _sock.recv(1 << 16)
+        if not c:
+            raise OSError("niri closed the socket")
+        _buf += c
+    line, _, _buf = _buf.partition(b"\n")
+    return loads(line)["Ok"][req]
+
+
+def spawn(*argv):
+    """Start argv with stdout piped; returns a function that waits and gives its output."""
+    r, w = os.pipe()
+    pid = os.posix_spawnp(argv[0], argv, os.environ, file_actions=[
+        (os.POSIX_SPAWN_DUP2, w, 1), (os.POSIX_SPAWN_OPEN, 2, "/dev/null", os.O_WRONLY, 0)])
+    os.close(w)
+
+    def result():
+        out = b""
+        while c := os.read(r, 1 << 16):
+            out += c
+        os.close(r)
+        os.waitpid(pid, 0)
+        return out
+    return result
+
+
+def unquote(s):
+    parts = s.split("%")
+    out = bytearray(parts[0].encode())
+    for p in parts[1:]:
+        try:
+            out += bytes.fromhex(p[:2]) + p[2:].encode()
+        except ValueError:
+            out += b"%" + p.encode()
+    return out.decode(errors="replace")
+
+
+def uri_dir(uri):
+    for pre in ("file:///", "file://localhost/"):
+        if (uri or "").startswith(pre):
+            p = unquote("/" + uri[len(pre):])
+            return p if os.path.isdir(p) else None
+    return None
+
 
 def name(p):
-    return "Home" if p == home else (os.path.basename(p.rstrip("/")) or "/")
+    return "Home" if p == HOME else (os.path.basename(p.rstrip("/")) or "/")
+
 
 def unique(paths):
-    paths = set(p for p in paths if p)
+    paths = {p for p in paths if p}
     return paths.pop() if len(paths) == 1 else None
 
-if app.lower() == "cursor":
-    st = json.load(open(os.path.join(home, ".config/Cursor/User/globalStorage/storage.json")))
+
+def cursor(w, wins):
+    with open(HOME + "/.config/Cursor/User/globalStorage/storage.json", "rb") as f:
+        st = loads(f.read())
     ws = st.get("windowsState") or {}
-    last = path((ws.get("lastActiveWindow") or {}).get("folder"))
-    cands = [last] + [path(w.get("folder")) for w in ws.get("openedWindows") or []] \
-        + [path(f.get("folderUri")) for f in (st.get("backupWorkspaces") or {}).get("folders") or []]
-    rest = re.sub(r"\s+[-—]\s+Cursor\s*$", "", title.strip())
-    hit = unique(p for p in cands if p and re.search(r"(^|\s[-—]\s)" + re.escape(name(p)) + r"$", rest))
-    if not hit and sum(1 for w in json.loads(subprocess.run(["niri", "msg", "-j", "windows"],
-            capture_output=True, text=True).stdout) if w.get("app_id") == app) == 1:
+    last = uri_dir((ws.get("lastActiveWindow") or {}).get("folder"))
+    cands = [last] + [uri_dir(x.get("folder")) for x in ws.get("openedWindows") or []] \
+        + [uri_dir(x.get("folderUri")) for x in (st.get("backupWorkspaces") or {}).get("folders") or []]
+    rest = w["title"].strip()
+    for sep in (" - ", " — "):
+        if rest.endswith(sep + "Cursor"):
+            rest = rest[:-len(sep) - 6]
+            break
+    hit = unique(p for p in cands if p and (rest == name(p) or rest.endswith((" - " + name(p), " — " + name(p)))))
+    if not hit and sum(x["app_id"] == w["app_id"] for x in wins) == 1:
         hit = last
-    print(hit or "")
-elif app == "com.anthropic.Claude":
-    if sum(1 for w in json.loads(subprocess.run(["niri", "msg", "-j", "windows"],
-            capture_output=True, text=True).stdout) if w.get("app_id") == app) != 1:
-        sys.exit(0)
-    base = os.path.join(home, ".config/Claude")
-    with open(os.path.join(base, "logs/main.log"), "rb") as f:
-        f.seek(max(0, os.fstat(f.fileno()).st_size - 4 * 1024 * 1024))
-        found = re.findall(rb"LocalSessions\.setFocusedSession: sessionId=(\S*)", f.read())
-    sid = found[-1].decode() if found else ""
-    if not re.fullmatch(r"local_[0-9a-f-]+", sid):
-        sys.exit(0)
+    return hit
+
+
+def claude(w, wins):
+    if sum(x["app_id"] == w["app_id"] for x in wins) != 1:
+        return None
+    base = HOME + "/.config/Claude"
+    key = b"LocalSessions.setFocusedSession: sessionId="
+    with open(base + "/logs/main.log", "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        for tail in (256 << 10, 4 << 20):
+            f.seek(max(0, size - tail))
+            data = f.read()
+            i = data.rfind(key)
+            if i >= 0 or tail >= size:
+                break
+    sid = (data[i + len(key):].split(None, 1) or [b""])[0].decode() if i >= 0 else ""
+    if not sid.startswith("local_") or len(sid) == 6 or sid[6:].strip("0123456789abcdef-"):
+        return None
     cwds = []
-    for sf in glob.glob(os.path.join(glob.escape(base), "claude-code-sessions", "*", "*", sid + ".json")):
-        s = json.load(open(sf))
-        if s.get("sessionId") == sid and isinstance(s.get("cwd"), str) and os.path.isdir(s["cwd"]):
-            cwds.append(s["cwd"])
-    print(unique(cwds) or "")
-else:
-    def bus(*a):
-        return json.loads(subprocess.run(["busctl", "--user", "--json=short", *a], capture_output=True, text=True, timeout=3).stdout)["data"]
-    owner = bus("call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-                "GetConnectionUnixProcessID", "s", "org.freedesktop.FileManager1")[0]
-    if str(owner) != pid:
-        sys.exit(0)
-    wins = bus("get-property", "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
-               "org.freedesktop.FileManager1", "OpenWindowsWithLocations")
-    hit = unique(path(u) for locs in wins.values() for u in locs if path(u) and name(path(u)) == title)
+    root = base + "/claude-code-sessions"
+    for a in os.scandir(root):
+        if a.name[0] == "." or not a.is_dir():
+            continue
+        for b in os.scandir(a.path):
+            if b.name[0] == "." or not b.is_dir():
+                continue
+            try:
+                with open(b.path + "/" + sid + ".json", "rb") as f:
+                    s = loads(f.read())
+            except OSError:
+                continue
+            if s.get("sessionId") == sid and isinstance(s.get("cwd"), str) and os.path.isdir(s["cwd"]):
+                cwds.append(s["cwd"])
+    return unique(cwds)
+
+
+def nautilus(w, wins):
+    bus = ("busctl", "--user", "--json=short", "--timeout=2")
+    owner = spawn(*bus, "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                  "GetConnectionUnixProcessID", "s", "org.freedesktop.FileManager1")
+    locs = spawn(*bus, "get-property", "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+                 "org.freedesktop.FileManager1", "OpenWindowsWithLocations")
+    if loads(owner())["data"][0] != w["pid"]:
+        locs()
+        return None
+    fm = loads(locs())["data"]
+    title = w["title"]
+    hit = unique(p for ls in fm.values() for u in ls if (p := uri_dir(u)) and name(p) == title)
     if not hit:
-        nw = sorted(w["id"] for w in json.loads(subprocess.run(["niri", "msg", "-j", "windows"],
-                    capture_output=True, text=True).stdout) if str(w.get("pid")) == pid)
-        dw = sorted(wins, key=lambda k: int(k.rsplit("/", 1)[-1]))
-        if len(nw) == len(dw) and int(wid) in nw:
-            locs = wins[dw[nw.index(int(wid))]]
-            hit = unique(path(u) for u in locs if path(u) and name(path(u)) == title)
-    print(hit or "")
-PYEOF
-)
-        dir=$(timeout 4 python3 -I -c "$py" "$app" "$wpid" "$wid" "$title" 2>/dev/null)
-        [ -n "$dir" ] && [ -d "$dir" ] && { printf '%s\n' "$dir"; exit 0; }
-        fallback ;;
-esac
+        nw = sorted(x["id"] for x in wins if x["pid"] == w["pid"])
+        dw = sorted(fm, key=lambda k: int(k.rsplit("/", 1)[-1]))
+        if len(nw) == len(dw) and w["id"] in nw:
+            hit = unique(p for u in fm[dw[nw.index(w["id"])]] if (p := uri_dir(u)) and name(p) == title)
+    return hit
 
-case "$app" in
-    org.gnome.Ptyxis|org.gnome.Console|kgx|foot|footclient|kitty|Alacritty|com.mitchellh.ghostty|org.wezfurlong.wezterm|xterm) ;;
-    *) fallback ;;
-esac
-[ -n "$wpid" ] && [ -d "/proc/$wpid" ] || fallback
 
-declare -A parent depth best bestd
-while read -r pid ppid tty comm; do parent[$pid]=$ppid; done < <(ps -eo pid=,ppid=,tty=,comm=)
-while read -r pid ppid tty comm; do
-    case "$comm" in bash|zsh|fish|sh|dash|ksh|nu|tcsh) ;; *) continue ;; esac
-    [ "$tty" = "?" ] && continue
-    p=$pid d=0
-    while [ -n "${parent[$p]}" ] && [ "$p" != "$wpid" ] && [ "$p" != 1 ]; do p=${parent[$p]}; d=$((d+1)); done
-    [ "$p" = "$wpid" ] || continue
-    if [ -z "${best[$tty]}" ] || [ "$d" -gt "${bestd[$tty]}" ]; then best[$tty]=$pid; bestd[$tty]=$d; fi
-done < <(ps -eo pid=,ppid=,tty=,comm=)
+def terminal(w):
+    """The deepest shell on every tty under the terminal (/proc children lists, not a full ps)."""
+    best, level, d = {}, [w["pid"]], 0
+    while level:
+        kids = []
+        for p in level:
+            try:
+                tasks = os.listdir("/proc/%d/task" % p)
+            except OSError:
+                continue
+            for t in tasks:
+                try:
+                    with open("/proc/%d/task/%s/children" % (p, t)) as f:
+                        kids += map(int, f.read().split())
+                except OSError:
+                    pass
+        d += 1
+        for c in kids:
+            try:
+                with open("/proc/%d/stat" % c) as f:
+                    st = f.read()
+            except OSError:
+                continue
+            e = st.rindex(")")
+            tty = int(st[e + 2:].split(None, 5)[4])
+            if tty and st[st.index("(") + 1:e] in SHELLS and (tty not in best or d > best[tty][0]):
+                best[tty] = (d, c)
+        level = kids
+    dirs = []
+    for tty, (_, p) in best.items():
+        try:
+            cwd = os.readlink("/proc/%d/cwd" % p)
+        except OSError:
+            continue
+        if os.path.isdir(cwd):
+            dirs.append((tty, cwd, p))
+    if len(dirs) <= 1:
+        return dirs[0][1] if dirs else None
+    head, sep, rest = w["title"].partition(":")
+    if sep and "@" in head and " " not in head and rest[:1] in ("~", "/"):
+        for hint in (rest.rsplit(" — ", 1)[0], rest):
+            if hint == "~" or hint.startswith("~/"):
+                hint = HOME + hint[1:]
+            for _, cwd, _ in dirs:
+                if cwd == hint:
+                    return cwd
 
-dirs=() ttys=()
-for tty in "${!best[@]}"; do
-    dir=$(readlink "/proc/${best[$tty]}/cwd" 2>/dev/null) && [ -d "$dir" ] || continue
-    dirs+=("$dir"); ttys+=("$tty")
-done
-[ "${#dirs[@]}" -gt 0 ] || fallback
-[ "${#dirs[@]}" -eq 1 ] && { printf '%s\n' "${dirs[0]}"; exit 0; }
+    def mtime(tty, pid):
+        """Last activity on the shell's tty, found through its own fds."""
+        for fd in (0, 1, 2):
+            try:
+                st = os.stat("/proc/%d/fd/%d" % (pid, fd))
+            except OSError:
+                continue
+            if st.st_rdev == tty:
+                return st.st_mtime
+        return 0
+    return max(dirs, key=lambda x: mtime(x[0], x[2]))[1]
 
-rest=$(printf '%s' "$title" | sed -n 's/^[^ :]*@[^ :]*:\([~/].*\)$/\1/p')
-for hint in "${rest% — *}" "$rest"; do
-    case "$hint" in "~") hint=$HOME ;; "~/"*) hint=$HOME/${hint#"~/"} ;; esac
-    [ -n "$hint" ] || continue
-    for dir in "${dirs[@]}"; do [ "$dir" = "$hint" ] && { printf '%s\n' "$dir"; exit 0; }; done
-done
-newest=0 pick=${dirs[0]}
-for i in "${!ttys[@]}"; do
-    t=$(stat -c %Y "/dev/${ttys[$i]}" 2>/dev/null || echo 0)
-    [ "$t" -gt "$newest" ] && { newest=$t; pick=${dirs[$i]}; }
-done
-printf '%s\n' "$pick"
+
+def main():
+    wins = niri("Windows")
+    w = next((x for x in wins if x["is_focused"]), None)
+    if not w:
+        act = next((s["active_window_id"] for s in niri("Workspaces") if s["is_focused"]), None)
+        w = next((x for x in wins if act is not None and x["id"] == act), None)
+    if not w:
+        return None
+    w["title"] = (w.get("title") or "").replace("\n", " ")
+    app = w.get("app_id") or ""
+    if app.lower() == "cursor":
+        return cursor(w, wins)
+    if app == "com.anthropic.Claude":
+        return claude(w, wins)
+    if app == "org.gnome.Nautilus":
+        return nautilus(w, wins)
+    if app in TERMS and w.get("pid"):
+        return terminal(w)
+    return None
+
+
+try:
+    d = main()
+except Exception:
+    d = None
+print(d if d and os.path.isdir(d) else HOME)

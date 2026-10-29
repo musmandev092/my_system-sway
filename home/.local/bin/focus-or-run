@@ -1,9 +1,35 @@
-#!/bin/sh
-id=$1; shift
-win=$(niri msg -j windows | python3 -c '
-import json, sys
-for w in json.load(sys.stdin):
-    if w.get("app_id") == sys.argv[1]:
-        print(w["id"]); break' "$id")
-if [ -n "$win" ]; then exec niri msg action focus-window --id "$win"; fi
-exec "$@"
+#!/usr/bin/python3 -IS
+"""focus-or-run APP_ID CMD...: focus the first window of APP_ID, else run CMD.
+Only C-builtin imports (_json, _socket): json and socket would add ~13 ms of startup."""
+import _json, _socket, os, sys
+
+
+class _Ctx:
+    strict = True
+    object_hook = object_pairs_hook = parse_constant = None
+    parse_float, parse_int = float, int
+
+
+def request(s, req):
+    s.sendall(req + b"\n")
+    buf = b""
+    while not buf.endswith(b"\n"):
+        c = s.recv(1 << 16)
+        if not c:
+            raise OSError("niri closed the socket")
+        buf += c
+    return _json.make_scanner(_Ctx)(buf.decode(), 0)[0]
+
+
+app, cmd = sys.argv[1], sys.argv[2:]
+try:
+    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    s.settimeout(2)
+    s.connect(os.environ["NIRI_SOCKET"])
+    wid = next((w["id"] for w in request(s, b'"Windows"')["Ok"]["Windows"] if w["app_id"] == app), None)
+    if wid is not None:
+        request(s, b'{"Action":{"FocusWindow":{"id":%d}}}' % wid)
+        sys.exit(0)
+except (OSError, KeyError, ValueError):
+    pass
+os.execvp(cmd[0], cmd)

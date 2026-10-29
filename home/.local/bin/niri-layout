@@ -1,26 +1,78 @@
-#!/usr/bin/env python3
-import glob, json, os, queue, re, socket, sys, threading, time
+#!/usr/bin/python3 -S
+import os, socket, sys
+
+CMD_SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "niri-layout.sock")
+
+if __name__ == "__main__" and sys.argv[1:2] in (["full"], ["edges"]):
+    # a key press spawns this: handed to the daemon before anything else is loaded
+    try:
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(CMD_SOCK)
+        s.sendall(sys.argv[1].encode() + b"\n")
+        s.close()
+        sys.exit(0)
+    except OSError:
+        pass
+
+import glob, json, queue, re, threading, time
 
 PEEK = int(os.environ.get("NIRI_LAYOUT_PEEK", "50"))
 TOL = 1.5
+_SOCK = None
+_CONN = None
 
 def sock_path():
+    global _SOCK
+    if _SOCK and os.path.exists(_SOCK):
+        return _SOCK
     p = os.environ.get("NIRI_SOCKET")
-    if p and os.path.exists(p):
-        return p
-    found = sorted(glob.glob("/run/user/%d/niri.*.sock" % os.getuid()), key=os.path.getmtime)
-    if not found:
-        sys.exit("niri-layout: no niri socket")
-    return found[-1]
+    if not (p and os.path.exists(p)):
+        found = sorted(glob.glob("/run/user/%d/niri.*.sock" % os.getuid()), key=os.path.getmtime)
+        if not found:
+            sys.exit("niri-layout: no niri socket")
+        p = found[-1]
+    _SOCK = p
+    return p
 
 def request(*reqs):
-    s = socket.socket(socket.AF_UNIX)
-    s.connect(sock_path())
-    s.sendall(b"".join(json.dumps(r).encode() + b"\n" for r in reqs))
-    f = s.makefile("r")
-    out = [json.loads(f.readline()) for _ in reqs]
-    s.close()
-    return out
+    """One connection kept open: niri answers the requests of a connection in order, each once
+    it has been carried out."""
+    global _CONN
+    data = b"".join(json.dumps(r).encode() + b"\n" for r in reqs)
+    for retry in (False, True):
+        try:
+            if _CONN is None:
+                s = socket.socket(socket.AF_UNIX)
+                s.connect(sock_path())
+                _CONN = (s, s.makefile("r"))
+            _CONN[0].sendall(data)
+            return [json.loads(_CONN[1].readline()) for _ in reqs]
+        except (OSError, ValueError):
+            if _CONN:
+                _CONN[0].close()
+            _CONN = None
+            if retry:
+                raise
+
+# Tile widths as niri reports them in its event stream, kept by the daemon's reader thread: a
+# width change is seen the moment niri lays it out, not at the next poll.
+LIVE = {}
+LIVE_CV = threading.Condition()
+LIVE_ON = False
+
+def live_update(ev):
+    if "WindowLayoutsChanged" in ev:
+        ch = [(i, l["tile_size"][0]) for i, l in ev["WindowLayoutsChanged"]["changes"]]
+    elif "WindowOpenedOrChanged" in ev:
+        w = ev["WindowOpenedOrChanged"]["window"]
+        ch = [(w["id"], w["layout"]["tile_size"][0])]
+    elif "WindowsChanged" in ev:
+        ch = [(w["id"], w["layout"]["tile_size"][0]) for w in ev["WindowsChanged"]["windows"]]
+    else:
+        return
+    with LIVE_CV:
+        LIVE.update(ch)
+        LIVE_CV.notify_all()
 
 def action(name, **args):
     return {"Action": {name: args}}
@@ -153,11 +205,21 @@ def relayout(st, ws_id, cls_override=None):
 
 def wait_sizes(want, timeout=1.0):
     """niri lays the columns out with the sizes the windows actually have, and a window takes a
-    frame or two to answer a resize; the view is only fixed up once they did."""
+    frame or two to answer a resize; the view is only fixed up once they did. Whatever is sent
+    next has to follow the commit closely: niri starts the resize animation at the commit, and a
+    scroll sent d ms later trails it by about 2 * d / duration of the width change."""
+    ok = lambda sizes: all(abs(sizes.get(i, t) - t) < TOL for i, t in want.items())
     end = time.monotonic() + timeout
+    if LIVE_ON:
+        with LIVE_CV:
+            while not ok(LIVE):
+                left = end - time.monotonic()
+                if left <= 0:
+                    return
+                LIVE_CV.wait(left)
+        return
     while time.monotonic() < end:
-        sizes = {w["id"]: w["layout"]["tile_size"][0] for w in request("Windows")[0]["Ok"]["Windows"]}
-        if all(abs(sizes.get(i, t) - t) < TOL for i, t in want.items()):
+        if ok({w["id"]: w["layout"]["tile_size"][0] for w in request("Windows")[0]["Ok"]["Windows"]}):
             return
         time.sleep(0.001)
 
@@ -360,12 +422,10 @@ def execute(ops, cols, f, t, history=()):
         pending.append(action("FocusWindow", id=want))
     flush()
     if any(op[0] == "f" for op in ops) or (f and f is not t):
-        # niri ignores the last FocusWindow of a write now and then; on its own it goes through
-        for _ in range(3):
-            time.sleep(0.03)
-            now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
-            if now and now["id"] == want:
-                break
+        # niri replies to an action once it is done: checked right away, no sleep (a FocusWindow
+        # resent 30 ms late restarts the view on its way)
+        now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
+        if not now or now["id"] != want:
             request(action("FocusWindow", id=want))
 
 
@@ -472,11 +532,8 @@ def place_blind(st, ws_id, cols, f, t, history, settle, d, removed):
             return False
         request(*reqs)
         want = f["id"] if f and f is not t else t["id"]
-        for _ in range(3):
-            time.sleep(0.05)
-            now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
-            if now and now["id"] == want:
-                break
+        now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
+        if not now or now["id"] != want:
             request(go(want))
     # from here on the view is taken to be where it was meant to go
     st2 = State()
@@ -491,8 +548,19 @@ def place_blind(st, ws_id, cols, f, t, history, settle, d, removed):
     return True
 
 
+_ANIM = {}
+
 def anim_secs(name):
     """Length of one of niri's animations from config.kdl (slowdown applied), 0 when off."""
+    try:
+        key = (name, os.path.getmtime(os.path.expanduser("~/.config/niri/config.kdl")))
+    except OSError:
+        key = (name, None)
+    if key not in _ANIM:
+        _ANIM[key] = _anim_secs(name)
+    return _ANIM[key]
+
+def _anim_secs(name):
     try:
         text = open(os.path.expanduser("~/.config/niri/config.kdl")).read()
         block = re.search(r"^animations \{\n(.*?)^\}", text, re.M | re.S).group(1)
@@ -506,7 +574,6 @@ def anim_secs(name):
     return (int(d.group(1)) / 1000 if d else 0.3) * slow
 
 
-CMD_SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "niri-layout.sock")
 KEY_MARK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "niri-layout.key")
 
 
@@ -565,54 +632,123 @@ def key_run(which, history=()):
         if p[2] is not None and p[2] < p[1] - TOL and p[1] < W - 0.5:
             LAST_SHRINK[p[0]["id"]] = time.monotonic()
     nw = [p[2] if p[2] is not None else w[k] for k, p in enumerate(plan)]
-    wops = [("w", t, nw[t])] + [("w", k, nw[k]) for k in range(len(w)) if k != t and abs(nw[k] - w[k]) >= TOL]
     xt = target_x(nw, t, W)
-    if new == "full":
-        # half -> full: one width change plus at most one view move (center-column for a middle
-        # column not yet at xt), animated together by window-resize and horizontal-view-movement
-        best = wops + ([("c",)] if 0 < t < len(w) - 1 and (V is None or abs(colx(w)[t] - V - xt) >= TOL) else [])
-        dbg("key ops", best)
-        execute(best, cols, f, f, history)
-        VIEW[ws] = {"ids": st.signature(ws)[1], "w": nw, "a": t, "V": colx(nw)[t] - xt}
+    if V is None and new == "half":
+        relayout(st, ws, {f["id"]: new})
+        place(ws, history)
         return
     if V is None:
-        relayout(st, ws, {f["id"]: new})
-        place(ws, history)
-        return
-    # full -> half: the new widths first, or, for the last column whose right edge has to stay
-    # while the column on its left comes in: the left neighbour made wider off screen, focused
-    # (the view slides right, exactly to where the column will start), the column narrowed (its
-    # right part is off screen), focused (fully visible: no scroll), the neighbour narrowed back
-    tries = [wops]
-    if t == len(w) - 1 and t > 0 and xt - 2 * G > nw[t - 1]:
-        L = t - 1
-        tries.append([("w", L, xt - 2 * G), ("f", L)] + [o for o in wops if o[1] != L] + [("f", t), ("w", L, nw[L])])
-    best, best_one_way = None, None
-    for pre in tries:
-        Vp, ap, wp, _ = sim(pre, w, V, t, W)
-        if ap != t:
-            continue
-        rest, _ = choose(wp, Vp, ap, t, W, xt)
-        if rest is None:
-            continue
-        ops = pre + rest
-        Vf, af, wf, path = sim(ops, w, V, t, W)
-        if any(abs(wf[k] - nw[k]) >= TOL for k in range(len(w))):
-            continue
-        score = (reversals(ops, w, V, t, W), jumps(path), sum(abs(d) for d in path))
-        if monotonic(V, path) and (best_one_way is None or score < best_one_way[0]):
-            best_one_way = (score, ops)
-        best = best or ops
-    if best_one_way:
-        best = best_one_way[1]
-    if best is None:
-        relayout(st, ws, {f["id"]: new})
-        place(ws, history)
-        return
-    dbg("key ops", best)
-    execute(best, cols, f, f, history)
-    Vf, af, wf, _ = sim(best, w, V, t, W)
+        V = colx(w)[t] - target_x(w, t, W)
+    phases, ops = toggle_plan(w, t, nw, V, W, xt)
+    dbg("key phases", phases)
+    run_phases(phases, cols, f, history)
+    Vf, af, wf, _ = sim(ops, w, V, t, W)
     VIEW[ws] = {"ids": st.signature(ws)[1], "w": wf, "a": t, "V": Vf}
+
+
+def screen_edges(w, V, W):
+    xs = colx(w)
+    return [(min(max(xs[k] - V, 0), W), min(max(xs[k] + w[k] - V, 0), W)) for k in range(len(w))]
+
+
+def unseen(op, w, V, a, W):
+    """A width change that moves nothing on screen: the column is off screen, or it is a peek
+    strip whose on-screen side stays (niri holds the focused column, so a column on its left
+    keeps its right edge and one on its right its left edge)."""
+    V2, _, w2, _ = sim([op], w, V, a, W)
+    return all(abs(p - q) < 1 for e1, e2 in zip(screen_edges(w, V, W), screen_edges(w2, V2, W))
+               for p, q in zip(e1, e2))
+
+
+def toggle_plan(w, t, nw, V, W, xt):
+    """Mod+F as phases: ("send", ops) one write, ("wait", columns) until they took their width.
+
+    niri moves the view along with a width change only when the focused column outgrows the
+    screen; a focused column that narrows keeps its left edge, so on its own its right edge
+    comes in and shows the background. So: the neighbours that change unseen first; then t,
+    either while another column is focused that already puts the view where it ends (the last
+    column: its right edge is off screen while it narrows, and focusing it back does not
+    scroll), or alone with the scroll sent the moment it took the width; the neighbours that
+    would show last (t focused: they do not move it)."""
+    n = len(w)
+    wt = ("w", t, nw[t])
+    others = [("w", k, nw[k]) for k in range(n) if k != t and abs(nw[k] - w[k]) >= TOL]
+    first = [o for o in others if unseen(o, w, V, t, W)]
+    later = [o for o in others if o not in first]
+    Va, _, wa, _ = sim(first, w, V, t, W)
+    wb = list(wa)
+    wb[t] = nw[t]
+    Vb = sim([wt], wa, Va, t, W)[0]
+    cands = [([wt], [], later)]
+    if nw[t] < w[t] and t == n - 1 and n > 1:
+        cands += [([("f", k), wt], [("f", t)], later) for k in range(t - 1, -1, -1)]
+    post, _ = choose(wb, Vb, t, t, W, xt)
+    if post:
+        cands.append(([wt], post, later))
+    if later:
+        Vc, _, wc, _ = sim([wt] + later, wa, Va, t, W)
+        post, _ = choose(wc, Vc, t, t, W, xt)
+        if post is not None:
+            cands.append(([wt] + later, post, []))
+    best = None
+    for pre, post, rest in cands:
+        ops = first + pre + post + rest
+        Vf, af, wf, path = sim(ops, w, V, t, W)
+        if af != t or abs(colx(wf)[t] - Vf - xt) >= TOL or any(abs(a - b) >= TOL for a, b in zip(wf, nw)):
+            continue
+        if pre[0][0] == "f" and abs(sim(first + pre + post, w, V, t, W)[3][-1]) >= TOL:
+            continue        # focusing t back scrolls: the view went past where it ends
+        r = reversals(ops, w, V, t, W)
+        if best is None or r < best[0]:
+            best = (r, pre, post, rest)
+        if r == 0:
+            break
+    if best is None:
+        best = (0, [wt] + later, choose(wc if later else wb, Vc if later else Vb, t, t, W, xt)[0] or [], [])
+    _, pre, post, rest = best
+    phases = []
+    if first:
+        phases += [("send", first), ("wait", [o[1] for o in first])]
+    phases += [("send", pre), ("wait", [o[1] for o in pre if o[0] == "w"])]
+    if post:
+        phases.append(("send", post))
+    if rest:
+        phases.append(("send", rest))
+    return phases, first + pre + post + rest
+
+
+PENDING = {}            # widths sent last and not waited for: the next key waits for them
+BUSY = [0.0]            # until when the animations of the last key run
+
+
+def run_phases(phases, cols, f, history=()):
+    def pick(k):
+        ids = [x["id"] for x in cols[k]]
+        if f["id"] in ids:
+            return f["id"]
+        return next((x for x in reversed(history) if x in ids), ids[0])
+
+    def enc(op):
+        if op[0] == "w":
+            return action("SetWindowWidth", id=cols[op[1]][0]["id"], change={"SetFixed": int(op[2])})
+        if op[0] == "f":
+            return action("FocusWindow", id=pick(op[1]))
+        return action("CenterColumn" if op[0] == "c" else "CenterVisibleColumns")
+
+    sent = {}
+    for kind, arg in phases:
+        if kind == "send":
+            if arg:
+                request(*[enc(o) for o in arg])
+                sent.update({cols[o[1]][0]["id"]: int(o[2]) for o in arg if o[0] == "w"})
+        else:
+            ids = [cols[k][0]["id"] for k in arg]
+            wait_sizes({i: sent.pop(i) for i in ids if i in sent})
+    PENDING.update(sent)
+    now = request("FocusedWindow")[0]["Ok"]["FocusedWindow"]
+    if not now or now["id"] != f["id"]:
+        request(action("FocusWindow", id=f["id"]))
+    BUSY[0] = time.monotonic() + max(anim_secs("window-resize"), anim_secs("horizontal-view-movement"))
 
 
 def view_follow(st, ws):
@@ -794,19 +930,29 @@ def patch_dms_media():
         subprocess.run(["systemctl", "--user", "reload", "dms.service"], check=False)
 
 
+QUICK_EVENTS = ("WindowFocusChanged", "WorkspaceActiveWindowChanged", "WindowFocusTimestampChanged",
+                "WindowLayoutsChanged", "WindowUrgencyChanged")
+
+
 def daemon():
     threading.Thread(target=patch_dms_media, daemon=True).start()
     q = queue.Queue()
 
     def reader():
+        global LIVE_ON
         s = socket.socket(socket.AF_UNIX)
         s.connect(sock_path())
         s.sendall(b'"EventStream"\n')
         for line in s.makefile("r"):
             try:
-                q.put(json.loads(line))
+                e = json.loads(line)
             except ValueError:
-                pass
+                continue
+            if isinstance(e, dict):
+                live_update(e)
+                LIVE_ON = LIVE_ON or "WindowsChanged" in e
+            q.put(e)
+        LIVE_ON = False
         q.put(None)
 
     threading.Thread(target=reader, daemon=True).start()
@@ -868,6 +1014,13 @@ def daemon():
         nonlocal last_focus, wsw
         try:
             if ev["Command"] in ("full", "edges"):
+                # started during the last key's animations, a narrowing column shows its edge
+                # moving in while the view still slides the other way
+                wait_sizes(dict(PENDING), 0.3)
+                PENDING.clear()
+                left = BUSY[0] - time.monotonic()
+                if left > 0:
+                    time.sleep(left)
                 st = State()
                 for ws in list(VIEW):
                     view_follow(st, ws)
@@ -930,16 +1083,44 @@ def daemon():
         if ev is None:
             sys.exit(0)
         if "Command" in ev:
-            run_command(ev)
+            # Mod+F pressed again while one ran: two toggles are none
+            burst, rest = [ev], []
+            while True:
+                try:
+                    e = q.get_nowait()
+                except queue.Empty:
+                    break
+                if e is None:
+                    sys.exit(0)
+                (burst if ev["Command"] == "full" and e.get("Command") == "full" else rest).append(e)
+            for e in rest:
+                q.put(e)
+            for e in burst[:-1]:
+                try:
+                    e["conn"].sendall(b"ok\n")
+                    e["conn"].close()
+                except OSError:
+                    pass
+            if len(burst) % 2:
+                run_command(burst[-1])
+            else:
+                try:
+                    burst[-1]["conn"].sendall(b"ok\n")
+                    burst[-1]["conn"].close()
+                except OSError:
+                    pass
             continue
         evs = [ev]
-        deadline = time.monotonic() + 0.3
+        # a focus change comes as a few events written at once: taken together without waiting
+        # (niri already scrolls by itself; a correction 50 ms later shows as a second movement)
+        quick = lambda e: all(k in QUICK_EVENTS for k in e)
+        deadline = time.monotonic() + (0.004 if quick(ev) else 0.3)
         while time.monotonic() < deadline:
             if any(((e.get("WindowOpenedOrChanged") or {}).get("window") or {}).get("id") not in known | {None}
                    or "WindowClosed" in e for e in evs):
                 break
             try:
-                ev = q.get(timeout=0.05)
+                ev = q.get(timeout=0.002 if all(quick(e) for e in evs) else 0.05)
             except queue.Empty:
                 break
             if ev is None:

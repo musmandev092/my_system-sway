@@ -307,7 +307,7 @@ if "\n    slowdown 0.35\n" not in s:
 block = r"    %s \{(?:\n(?:        [^\n]*\n)*?    \}|[^\n]*\})\n"
 for name, ms in (("window-open", 257), ("window-close", 200), ("horizontal-view-movement", 286), ("window-movement", 286), ("window-resize", 286)):
     s = re.sub(block % name, '    %s {\n        duration-ms %d\n        curve "ease-out-quad"\n    }\n' % (name, ms), s, count=1)
-s = re.sub(block % "workspace-switch", '    workspace-switch {\n        spring damping-ratio=1.0 stiffness=1000 epsilon=0.0001\n    }\n', s, count=1)
+s = re.sub(block % "workspace-switch", '    workspace-switch {\n        duration-ms 170\n        curve "linear"\n    }\n', s, count=1)
 for name, stiff in (("overview-open-close", 800),):
     s = re.sub(r"(    %s \{\n        spring )damping-ratio=[0-9.]+ stiffness=\d+" % name,
                r"\g<1>damping-ratio=1.0 stiffness=%d" % stiff, s, count=1)
@@ -344,9 +344,13 @@ XF86Calculator|Calculator|"gnome-calculator"
 Mod+T|System Monitor|"ptyxis" "-s" "-x" "btop"
 Mod+grave|Open Terminal|"ptyxis" "--new-window"
 Mod+S|Settings|"dms" "ipc" "call" "settings" "focusOrToggle"
-Mod+E|Files|"focus-or-run" "org.gnome.Nautilus" "nautilus" "--new-window"
+Mod+E|Files|"nautilus" "--new-window"
 Mod+Z repeat=false|Open Here|"dms" "ipc" "call" "openHere" "toggle"
 EOF
+    if [ -f "$nb" ] && grep -q '^    Mod+E .*focus-or-run.*nautilus' "$nb"; then
+        sed -i 's/^    Mod+E .*focus-or-run.*nautilus.*$/    Mod+E hotkey-overlay-title="Files" { spawn "nautilus" "--new-window"; }/' "$nb"
+        changed=1
+    fi
     if [ -f "$nb" ] && grep -q '^    Mod+T hotkey-overlay-title="Open Terminal"' "$nb"; then
         sed -i 's/^    Mod+T hotkey-overlay-title="Open Terminal".*$/    Mod+T hotkey-overlay-title="System Monitor" { spawn "ptyxis" "-s" "-x" "btop"; }/' "$nb"
         changed=1
