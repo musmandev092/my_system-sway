@@ -110,9 +110,10 @@ try:
     wait_for(r"(\$ |> |❯)", 90)
     import base64
     send("stty -echo; export PAGER=cat SYSTEMD_PAGER=cat\r")
-    shot = ("u=$(id -u greeter); s=$(echo test | sudo -S sh -c \"ls /run/user/$u/niri*.sock\" 2>/dev/null | head -1); "
-            "echo test | sudo -S -u greeter env XDG_RUNTIME_DIR=/run/user/$u NIRI_SOCKET=$s "
-            "niri msg action screenshot-screen --path /tmp/vm-shot.png >/dev/null 2>&1; sleep 2; "
+    shot = ("u=$(id -u greeter); s=$(echo test | sudo -S sh -c \"ls /run/user/$u/sway-ipc.*.sock\" 2>/dev/null | head -1); "
+            "w=$(echo test | sudo -S sh -c \"ls /run/user/$u/ | grep -m1 '^wayland-[0-9]*$'\" 2>/dev/null); "
+            "echo test | sudo -S -u greeter env XDG_RUNTIME_DIR=/run/user/$u SWAYSOCK=$s WAYLAND_DISPLAY=$w "
+            "grim /tmp/vm-shot.png >/dev/null 2>&1; sleep 2; "
             "printf '==%s==\\n' SHOT; echo test | sudo -S base64 -w0 /tmp/vm-shot.png 2>/dev/null; printf '\\n==%s==\\n' ENDSHOT\r")
     send(shot)
     raw = ANSI.sub("", wait_for(r"==ENDSHOT==", 60))
@@ -120,7 +121,7 @@ try:
     if m:
         open(f"{VM}/{args.screenshot}.png", "wb").write(base64.b64decode(m.group(1)))
     else:
-        print("screenshot: none (no greeter niri running?)", flush=True)
+        print("screenshot: none (no greeter sway running?)", flush=True)
     payload = base64.b64encode(open(args.script, "rb").read()).decode()
     send(f"echo {payload} | base64 -d > /tmp/run.sh; printf '==%s==\\n' START; bash /tmp/run.sh 2>&1; printf '==%s==\\n' DONE\r")
     out = wait_for(r"==DONE==", args.timeout)

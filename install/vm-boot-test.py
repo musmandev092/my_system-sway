@@ -88,11 +88,11 @@ try:
     checks = r"""
 printf '==%s==\n' BEGIN
 echo "## kernel:"; uname -r
-echo "## installed:"; rpm -q niri dms dms-greeter greetd claude-desktop brave-origin toolbox nvidia-kmod-control nautilus sushi ptyxis cups | sed 's/^/  /'
+echo "## installed:"; rpm -q sway dms dms-greeter greetd claude-desktop brave-origin toolbox nvidia-kmod-control nautilus sushi ptyxis cups | sed 's/^/  /'
 echo "## packages total: $(rpm -qa | wc -l)"
 echo "## boot target: $(systemctl get-default)"
 echo "## greetd: $(systemctl is-enabled greetd) / $(systemctl is-active greetd)"
-echo "## dms with niri: $(ls /etc/systemd/user/niri.service.wants/ 2>/dev/null)"
+echo "## sway: $(sway --version 2>/dev/null)"
 echo "## disk:"; lsblk -o NAME,FSTYPE,MOUNTPOINTS | sed 's/^/  /'
 echo "## claude-desktop-verify:"; claude-desktop-verify 2>&1 | tail -1
 echo "## repos:"; ls /etc/yum.repos.d/ | sed 's/^/  /'
@@ -103,7 +103,7 @@ echo "## failed units:"; systemctl --failed --no-legend | sed 's/^/  /'
 echo "## graphics:"; ls /dev/dri/ | sed 's/^/  /'
 echo "## greetd status:"; systemctl status greetd --no-pager -n 0 | sed -n '1,4p' | sed 's/^/  /'
 echo "## login-screen log:"; echo test | sudo -S journalctl -b --no-pager -o cat -u greetd 2>/dev/null | tail -25 | sed 's/^/  /'
-echo "## niri/greeter errors:"; echo test | sudo -S journalctl -b --no-pager -o short-monotonic -p warning 2>/dev/null | grep -iE 'niri|greet|quickshell|dms|egl|gbm|drm' | tail -25 | sed 's/^/  /'
+echo "## sway/greeter errors:"; echo test | sudo -S journalctl -b --no-pager -o short-monotonic -p warning 2>/dev/null | grep -iE 'sway|greet|quickshell|dms|egl|gbm|drm' | tail -25 | sed 's/^/  /'
 printf '==%s==\n' END
 """
     for line in checks.strip().splitlines():

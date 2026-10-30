@@ -1,0 +1,9 @@
+# DMS also runs the templates in this file whenever the theme changes (Settings > Theme).
+# Sway window title bars and borders follow the DMS colours.
+
+[config]
+
+[templates.sway]
+input_path = '~/.config/matugen/templates/sway-colors.conf'
+output_path = '~/.config/sway/dms-colors.conf'
+post_hook = 'sh -c "$HOME/.local/bin/sway-colors-apply"'

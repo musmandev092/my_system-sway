@@ -10,16 +10,16 @@ chk "root is btrfs"                     sh -c 'findmnt -no FSTYPE / | grep -qx b
 chk "no failed services"                sh -c '[ -z "$(systemctl --failed --no-legend)" ]'
 pend=$(s dnf -q check-upgrade | grep -cE '\.(x86_64|noarch)')
 chk "fully updated ($pend pending)"     test "$pend" -eq 0
-echo "  niri $(rpm -q --qf '%{VERSION}' niri), kernels: $(rpm -q kernel | tr '\n' ' ')"
+echo "  sway $(rpm -q --qf '%{VERSION}' sway), kernels: $(rpm -q kernel | tr '\n' ' ')"
 echo "  NVIDIA modules for: $(rpm -qa 'kmod-nvidia-*' --qf '%{NAME}\n' | sed 's/kmod-nvidia-//; s/-615.*//' | tr '\n' ' ')"
 systemctl --failed --no-legend | sed 's/^/        /'
 
 echo "## desktop"
 chk "login screen (greetd) running"     systemctl is-active greetd
 chk "quickshell is 0.3+ (DMS build)"    sh -c 'rpm -q quickshell | grep -q "^quickshell-0\.[3-9]"'
-chk "DMS starts with niri"              test -e /etc/systemd/user/niri.service.wants/dms.service
+chk "sway is 1.12"                     sh -c 'sway --version | grep -q 1.12'
 chk "Fedora copies of DMS deps hidden"  test -f /etc/dnf/repos.override.d/50-dms-copr.repo
-for p in quickshell danksearch dgop matugen dms dms-greeter niri; do printf '        %s\n' "$(rpm -q $p)"; done
+for p in quickshell danksearch dgop matugen dms dms-greeter sway sway-config-fedora; do printf '        %s\n' "$(rpm -q $p)"; done
 
 echo "## apps"
 for p in claude-desktop brave-origin chromium microsoft-edge-stable toolbox nautilus sushi ptyxis papers loupe showtime snapshot cups system-config-printer nvidia-kmod-control; do

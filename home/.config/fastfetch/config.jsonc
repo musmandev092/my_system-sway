@@ -165,6 +165,15 @@
             "text": "dnf history list 2>/dev/null | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' | sort -r | head -1"
         },
         "break",
-        "colors"
+        {
+            "type": "colors",
+            "symbol": "circle",
+            "block": { "range": [0, 7] }
+        },
+        {
+            "type": "colors",
+            "symbol": "circle",
+            "block": { "range": [8, 15] }
+        }
     ]
 }

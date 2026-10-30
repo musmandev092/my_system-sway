@@ -32,7 +32,7 @@ clean() {
     esac
 
     printf 'This removes package caches, unused Flatpaks, old logs, crash dumps, caches, and trash.\n'
-    (( deep )) && printf 'Deep mode: also Go/npm caches + btrfs scrub + light balance (takes a few minutes).\n'
+    (( deep )) && printf 'Deep mode: also btrfs scrub + light balance (takes a few minutes).\n'
     printf 'Continue? [y/N] '
     local answer
     read -r answer
@@ -60,14 +60,6 @@ clean() {
     echo '==> Unused podman images (containers are never touched)'
     podman image prune -f >/dev/null 2>&1 || true
 
-    echo '==> Dev toolbox (unused packages + dnf cache)'
-    if toolbox list -c 2>/dev/null | grep -qw dev; then
-        toolbox run -c dev sudo dnf autoremove -y
-        toolbox run -c dev sudo dnf clean all
-    else
-        echo '    skipped: no dev toolbox'
-    fi
-
     echo '==> Brave cache'
     if pgrep -f brave-origin >/dev/null; then
         echo '    skipped: Brave is open (close it to clean its cache)'
@@ -82,10 +74,6 @@ clean() {
     fi
 
     if (( deep )); then
-        echo '==> Go build cache + npm cache (rebuilt on demand)'
-        toolbox run -c dev go clean -cache 2>/dev/null || true
-        toolbox run -c dev npm cache clean --force 2>/dev/null || true
-
         echo '==> Btrfs scrub (checks every block against its checksum)'
         sudo btrfs scrub start -B /
         echo '==> Btrfs light balance (repacks nearly-empty data chunks)'

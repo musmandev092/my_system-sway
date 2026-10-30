@@ -1,0 +1,12 @@
+{
+    "id": "doctor",
+    "name": "System Doctor",
+    "description": "One panel that checks the system: Sway, DMS, NVIDIA driver, keyring, firewall, SELinux, services, monitors, disk, plus DMS's own health report. dms ipc call doctor toggle (Super+Alt+d)",
+    "version": "1.0.0",
+    "author": "Muhammad Usman",
+    "type": "daemon",
+    "capabilities": ["daemon", "ipc"],
+    "component": "./DoctorDaemon.qml",
+    "icon": "health_and_safety",
+    "requires": ["sway", "dms"]
+}

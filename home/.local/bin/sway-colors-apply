@@ -1,0 +1,8 @@
+#!/bin/sh
+# Apply the client.* colours from ~/.config/sway/dms-colors.conf to the running Sway (no reload, no flicker).
+f="${XDG_CONFIG_HOME:-$HOME/.config}/sway/dms-colors.conf"
+[ -f "$f" ] && [ -n "$SWAYSOCK" ] || exit 0
+grep '^client\.' "$f" | while read -r line; do
+    swaymsg "$line" >/dev/null 2>&1
+done
+exit 0

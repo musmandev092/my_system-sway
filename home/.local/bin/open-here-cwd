@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -IS
 """Print the working directory of the focused window for Open Here ($HOME when unknown).
 Only C-builtin imports: json, re, glob, urllib and subprocess each add 3-10 ms of startup."""
-import _json, _socket, os, sys
+import _json, os, sys
 
 HOME = os.path.expanduser("~")
 SHELLS = {"bash", "zsh", "fish", "sh", "dash", "ksh", "nu", "tcsh"}
@@ -20,25 +20,6 @@ _scan = _json.make_scanner(_Ctx)
 
 def loads(b):
     return _scan(b.decode(), 0)[0]
-
-
-_sock, _buf = None, b""
-
-
-def niri(req):
-    global _sock, _buf
-    if _sock is None:
-        _sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        _sock.settimeout(2)
-        _sock.connect(os.environ["NIRI_SOCKET"])
-    _sock.sendall(b'"%s"\n' % req.encode())
-    while b"\n" not in _buf:
-        c = _sock.recv(1 << 16)
-        if not c:
-            raise OSError("niri closed the socket")
-        _buf += c
-    line, _, _buf = _buf.partition(b"\n")
-    return loads(line)["Ok"][req]
 
 
 def spawn(*argv):
@@ -218,12 +199,20 @@ def terminal(w):
     return max(dirs, key=lambda x: mtime(x[0], x[2]))[1]
 
 
+def windows(node, out):
+    for n in node.get("nodes", []) + node.get("floating_nodes", []):
+        if n.get("pid") and n.get("type") in ("con", "floating_con"):
+            n["app_id"] = n.get("app_id") or (n.get("window_properties") or {}).get("class")
+            n["title"] = n.get("name")
+            n["is_focused"] = n.get("focused")
+            out.append(n)
+        windows(n, out)
+    return out
+
+
 def main():
-    wins = niri("Windows")
+    wins = windows(loads(spawn("swaymsg", "-t", "get_tree")()), [])
     w = next((x for x in wins if x["is_focused"]), None)
-    if not w:
-        act = next((s["active_window_id"] for s in niri("Workspaces") if s["is_focused"]), None)
-        w = next((x for x in wins if act is not None and x["id"] == act), None)
     if not w:
         return None
     w["title"] = (w.get("title") or "").replace("\n", " ")

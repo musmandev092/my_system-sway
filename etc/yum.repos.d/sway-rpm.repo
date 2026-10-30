@@ -1,0 +1,6 @@
+[sway-rpm]
+name=Sway and wlroots for Fedora 44 (rebuilt from Rawhide)
+baseurl=https://musmandev092.github.io/sway-rpm/fc44/x86_64
+enabled=1
+gpgcheck=1
+gpgkey=https://musmandev092.github.io/sway-rpm/RPM-GPG-KEY-sway-rpm.asc

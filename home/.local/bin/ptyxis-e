@@ -1,0 +1,13 @@
+#!/usr/bin/python3 -I
+"""ptyxis-e: lets DMS open "run in terminal" apps (btop and others) in Ptyxis.
+
+DMS runs   <terminal> -e sh -c "<command>"
+Ptyxis has no -e; it takes   -x "<command>"   instead. This turns one into the other."""
+import os, shlex, sys
+
+args = sys.argv[1:]
+if args[:1] == ["-e"]:
+    args = args[1:]
+if not args:
+    os.execvp("ptyxis", ["ptyxis", "-s", "--new-window"])
+os.execvp("ptyxis", ["ptyxis", "-s", "-x", " ".join(shlex.quote(a) for a in args)])

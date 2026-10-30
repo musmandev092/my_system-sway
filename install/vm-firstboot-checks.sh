@@ -35,7 +35,7 @@ grep -E 'ok|!!|mason:|treesitter:' ~/.local/state/my_system/firstrun.log 2>/dev/
 chk "custom.sh linked"                 test -L ~/.bashrc.d/custom.sh
 chk "starship"                         ~/.local/bin/starship --version
 chk "agy"                              ~/.local/bin/agy --version
-chk "niri config loads DMS"            grep -q 'dms/' ~/.config/niri/config.kdl
+chk "sway: DMS binds linked"            test -L ~/.config/sway/config.d/91-dms.conf
 chk "Chromium Google sign-in flags"    grep -q oauth2-client-id ~/.config/chromium-flags.conf
 chk "dev toolbox: nvim"                toolbox run -c dev nvim --version
 chk "dev toolbox: cargo"               toolbox run -c dev cargo --version

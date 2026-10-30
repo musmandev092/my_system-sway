@@ -33,8 +33,8 @@ chk "custom.sh linked"                test -L ~/.bashrc.d/custom.sh
 chk "nvim config linked"              test -L ~/.config/nvim
 chk "fonts installed"                 sh -c 'fc-list | grep -qi "JetBrainsMono Nerd"'
 chk "Urdu font installed"             sh -c 'fc-list | grep -qi "Jameel"'
-chk "niri config loads DMS"           grep -q 'dms/' ~/.config/niri/config.kdl
-chk "niri config valid"               niri validate -c ~/.config/niri/config.kdl
+chk "sway: DMS binds linked"           test -L ~/.config/sway/config.d/91-dms.conf
+chk "sway config valid"               sway -C
 chk "DMS settings"                    test -f ~/.config/dms/settings.json
 chk "starship"                        ~/.local/bin/starship --version
 chk "lazygit"                         ~/.local/bin/lazygit --version

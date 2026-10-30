@@ -1,6 +1,6 @@
 # my_system
 
-Rebuild my laptop (Dell Precision 7770) from zero: Fedora 44 + niri + DMS, encrypted disk, drivers, apps and configs.
+Rebuild my laptop (Dell Precision 7770) from zero: Fedora 44 + Sway 1.12 + DMS, encrypted disk, drivers, apps and configs.
 
 ## Build the installer ISO
 

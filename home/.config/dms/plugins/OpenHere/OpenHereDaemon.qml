@@ -24,7 +24,7 @@ PluginComponent {
     readonly property var entries: [
         { label: "Claude Code", hint: "claude", icon: "smart_toy", cmd: d => ["ptyxis", "-s", "-d", d, "-x", "claude"] },
         { label: "Antigravity", hint: "agy", icon: "rocket_launch", cmd: d => ["ptyxis", "-s", "-d", d, "-x", "agy"] },
-        { label: "Cursor", hint: "cursor", icon: "code", cmd: d => ["cursor", d] },
+        { label: "VS Code", hint: "code", icon: "code", cmd: d => ["code", d] },
         { label: "Files", hint: "nautilus", icon: "folder_open", cmd: d => ["nautilus", "--new-window", d] },
         { label: "Terminal", hint: "ptyxis", icon: "terminal", cmd: d => ["ptyxis", "-s", "--new-window", "-d", d] },
         { label: "Neovim", hint: "toolbox dev: nvim", icon: "edit_note", cmd: d => ["ptyxis", "-s", "-d", d, "-x", root.inToolbox("nvim")] },

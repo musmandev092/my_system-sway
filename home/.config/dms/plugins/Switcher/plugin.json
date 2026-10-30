@@ -1,0 +1,12 @@
+{
+    "id": "switcher",
+    "name": "Window Switcher",
+    "description": "Windows 11 style switcher for Sway: Alt+Tab shows the windows of this workspace, Super+Tab shows every workspace, both with previews. dms ipc call switcher open windows|overview",
+    "version": "1.0.0",
+    "author": "Muhammad Usman",
+    "type": "daemon",
+    "capabilities": ["daemon", "ipc"],
+    "component": "./SwitcherDaemon.qml",
+    "icon": "view_carousel",
+    "requires": ["sway", "grim"]
+}
