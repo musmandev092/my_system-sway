@@ -19,7 +19,7 @@ for p in (SER, MON):
 
 qemu = subprocess.Popen([
     "qemu-system-x86_64", "-name", "my_system-boot", "-enable-kvm", "-machine", "q35",
-    "-cpu", "host", "-smp", "4", "-m", "8192",
+    "-cpu", "host", "-smp", "18", "-m", "32768",
     "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF}/OVMF_CODE.fd",
     "-drive", f"if=pflash,format=raw,file={VM}/vars.fd",
     "-drive", f"file={VM}/disk.qcow2,if=virtio,format=qcow2",

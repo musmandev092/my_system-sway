@@ -29,11 +29,18 @@ do_system() {
 
     sys_put "$HERE/etc/yum.repos.d/vscode.repo" /etc/yum.repos.d/vscode.repo || true
     rpm -q code >/dev/null 2>&1 || $SUDO dnf -y install code
+    # the login session entry comes from sway-config-fedora, which we do not install (it pulls in Waybar)
+    sys_put "$HERE/etc/wayland-sessions/sway.desktop" /usr/share/wayland-sessions/sway.desktop || true
     if sys_put "$HERE/etc/yum.repos.d/sway-rpm.repo" /etc/yum.repos.d/sway-rpm.repo || ! rpm -q gpg-pubkey-49c90df85566d034 >/dev/null 2>&1; then
         $SUDO rpm --import "$HERE/install/rpms/RPM-GPG-KEY-sway-rpm.asc"
     fi
     if sway --version 2>/dev/null | grep -q ' 1\.1[2-9]'; then done_ "sway $(sway --version | awk '{print $3}') (sway-rpm)"
-    else $SUDO dnf -y --refresh install sway wlroots sway-config-minimal && done_ "sway 1.12+ (installed from sway-rpm)"; fi
+    else
+        $SUDO dnf -y --refresh install sway wlroots sway-config-minimal
+        $SUDO dnf -y upgrade sway wlroots sway-config-minimal   # Fedora's own 1.11 may already be installed: install alone keeps it
+        if sway --version 2>/dev/null | grep -q ' 1\.1[2-9]'; then done_ "sway $(sway --version | awk '{print $3}') (installed from sway-rpm)"
+        else note "sway 1.12 NOT installed (have $(rpm -q sway)); check the sway-rpm repo and run apply.sh system again"; fi
+    fi
     done_ "VS Code $(rpm -q --qf '%{VERSION}' code)"
 
     local extra=(dconf fwupd-efi fwupd-plugin-uefi-capsule-data gnome-software PackageKit rpmfusion-free-appstream-data rpmfusion-nonfree-appstream-data
@@ -43,7 +50,7 @@ do_system() {
                  google-noto-sans-bengali-vf-fonts google-noto-color-emoji-fonts dejavu-sans-fonts
                  dejavu-sans-mono-fonts dejavu-serif-fonts adwaita-sans-fonts adwaita-mono-fonts
                  xdg-desktop-portal-gtk pipewire-gstreamer cups-pk-helper gutenprint-cups kf6-kimageformats alsa-utils btop
-                 sway sway-config-minimal sway-systemd grim grimshot slurp brightnessctl
+                 sway sway-config-minimal sway-systemd swaybg grim grimshot slurp brightnessctl
                  pulseaudio-utils lxqt-policykit xdg-desktop-portal-wlr
                  ffmpeg gstreamer1-plugin-libav gstreamer1-plugins-ugly gstreamer1-plugins-bad-freeworld) missing=() p
     for p in "${extra[@]}"; do rpm -q "$p" >/dev/null 2>&1 || missing+=("$p"); done
