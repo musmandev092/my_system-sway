@@ -11,8 +11,10 @@ for _ in $(seq 120); do
 done
 sleep 15
 
-notify "Setting up your desktop" "Dotfiles, toolbox and Neovim: about 10 minutes. You can keep working."
-if "$HOME/Projects/my_system/apply.sh" home toolbox nvim > "$log" 2>&1; then
+steps="home toolbox nvim"
+[ -e "$HOME/Projects/my_system/.lean" ] && steps="home"   # lean build: toolbox and Neovim later, by hand
+notify "Setting up your desktop" "Dotfiles and tools ($steps): a few minutes. You can keep working."
+if "$HOME/Projects/my_system/apply.sh" $steps > "$log" 2>&1; then
     touch "$state/firstrun.done"
     notify "Your desktop is ready" "Everything is set up. Log: $log"
 else

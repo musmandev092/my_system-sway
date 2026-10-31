@@ -15,10 +15,23 @@ command -v ksvalidator >/dev/null && {
     ksvalidator -v F44 "$KS_DUAL"
 }
 
+# lean: only the dual-boot ISO, with Brave + Claude Desktop (no Chromium, Edge, VS Code, Antigravity, toolbox/Neovim)
+LEAN=0; [ "${1:-}" = lean ] && LEAN=1
+
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 rsync -a --exclude='target/' --exclude='.git/' --exclude='__pycache__/' --exclude='*.log' \
       --exclude='*.bak' --exclude='*.bak.*' "$HERE/../" "$STAGE/my_system/"
+
+if [ "$LEAN" = 1 ]; then
+    touch "$STAGE/my_system/.lean"
+    sed -i '/^chromium$/d; /^microsoft-edge-stable$/d' "$STAGE/my_system/install/ks-dualboot.cfg"
+    OUT="$DIR/my_system-fedora44-dualboot-lean.iso"
+    rm -f "$OUT"
+    mkksiso --skip-mkefiboot --ks "$STAGE/my_system/install/ks-dualboot.cfg" -a "$STAGE/my_system" -c "fbcon=font:TER16x32" "$SRC" "$OUT"
+    ls -lh "$OUT"
+    exit 0
+fi
 
 rm -f "$DIR/my_system-fedora44.iso" "$DIR/my_system-fedora44-dualboot.iso" "$DIR/my_system-fedora44-vm.iso"
 mkksiso --skip-mkefiboot --ks "$KS" -a "$STAGE/my_system" -c "fbcon=font:TER16x32" "$SRC" "$DIR/my_system-fedora44.iso"

@@ -9,6 +9,8 @@ in_container() { [ -f /run/.toolboxenv ] || [ -f /run/.containerenv ]; }
 
 in_container && { echo "Run apply.sh on the host, not inside a toolbox." >&2; exit 1; }
 SUDO=sudo
+# a file called .lean next to apply.sh (put there by build-iso.sh lean) skips the big optional apps
+LEAN=0; [ -e "$HERE/.lean" ] && LEAN=1
 if [ "$(id -u)" -eq 0 ]; then
     [ "$*" = system ] || { echo "Run apply.sh as your user (as root only: apply.sh system)." >&2; exit 1; }
     SUDO=""
@@ -27,8 +29,10 @@ do_system() {
     say "system (sudo)"
     [ -z "$SUDO" ] || $SUDO -n true 2>/dev/null || $SUDO -v
 
-    sys_put "$HERE/etc/yum.repos.d/vscode.repo" /etc/yum.repos.d/vscode.repo || true
-    rpm -q code >/dev/null 2>&1 || $SUDO dnf -y install code
+    if [ "$LEAN" = 0 ]; then
+        sys_put "$HERE/etc/yum.repos.d/vscode.repo" /etc/yum.repos.d/vscode.repo || true
+        rpm -q code >/dev/null 2>&1 || $SUDO dnf -y install code
+    fi
     # the login session entry comes from sway-config-fedora, which we do not install (it pulls in Waybar)
     sys_put "$HERE/etc/wayland-sessions/sway.desktop" /usr/share/wayland-sessions/sway.desktop || true
     if sys_put "$HERE/etc/yum.repos.d/sway-rpm.repo" /etc/yum.repos.d/sway-rpm.repo || ! rpm -q gpg-pubkey-49c90df85566d034 >/dev/null 2>&1; then
@@ -41,7 +45,7 @@ do_system() {
         if sway --version 2>/dev/null | grep -q ' 1\.1[2-9]'; then done_ "sway $(sway --version | awk '{print $3}') (installed from sway-rpm)"
         else note "sway 1.12 NOT installed (have $(rpm -q sway)); check the sway-rpm repo and run apply.sh system again"; fi
     fi
-    done_ "VS Code $(rpm -q --qf '%{VERSION}' code)"
+    if [ "$LEAN" = 0 ]; then done_ "VS Code $(rpm -q --qf '%{VERSION}' code)"; else done_ "VS Code skipped (lean build)"; fi
 
     local extra=(dconf fwupd-efi fwupd-plugin-uefi-capsule-data gnome-software PackageKit rpmfusion-free-appstream-data rpmfusion-nonfree-appstream-data
                  libayatana-appindicator-gtk3 plymouth-system-theme gh gnome-keyring-pam lynis
@@ -353,17 +357,23 @@ PYEOF
         rm -rf "$tmp"
     fi
 
-    if [ ! -x "$HOME/.local/bin/agy" ]; then
-        curl -fsSL https://antigravity.google/cli/install.sh | bash >/dev/null 2>&1 \
-            || note "Antigravity installer failed (network?); run apply.sh home again"
+    if [ "$LEAN" = 1 ]; then done_ "Antigravity skipped (lean build)"
+    else
+        if [ ! -x "$HOME/.local/bin/agy" ]; then
+            curl -fsSL https://antigravity.google/cli/install.sh | bash >/dev/null 2>&1 \
+                || note "Antigravity installer failed (network?); run apply.sh home again"
+        fi
+        done_ "agy $("$HOME/.local/bin/agy" --version 2>/dev/null)"
     fi
-    done_ "agy $("$HOME/.local/bin/agy" --version 2>/dev/null)"
 
-    if [ ! -x "$HOME/.local/bin/claude" ]; then
-        curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 \
-            || note "Claude Code installer failed (network?); run apply.sh home again"
+    if [ "$LEAN" = 1 ]; then done_ "Claude Code skipped (lean build)"
+    else
+        if [ ! -x "$HOME/.local/bin/claude" ]; then
+            curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 \
+                || note "Claude Code installer failed (network?); run apply.sh home again"
+        fi
+        done_ "claude $("$HOME/.local/bin/claude" --version 2>/dev/null | cut -d' ' -f1)"
     fi
-    done_ "claude $("$HOME/.local/bin/claude" --version 2>/dev/null | cut -d' ' -f1)"
 }
 
 do_toolbox() {
